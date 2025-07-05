@@ -1,0 +1,6 @@
+.vagrant/*
+slurm-base.box
+vagrant-src/*
+vagrant-src
+slurm
+slurm/*

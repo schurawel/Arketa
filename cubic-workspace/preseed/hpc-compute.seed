@@ -1,0 +1,43 @@
+# HPC Compute Node Preseed Configuration
+d-i debian-installer/locale string en_US
+d-i keyboard-configuration/xkb-keymap select us
+
+# Network configuration (will be customized per node)
+d-i netcfg/choose_interface select auto
+d-i netcfg/disable_autoconfig boolean true
+d-i netcfg/get_ipaddress string 192.168.1.11
+d-i netcfg/get_netmask string 255.255.255.0
+d-i netcfg/get_gateway string 192.168.1.1
+d-i netcfg/get_nameservers string 8.8.8.8
+d-i netcfg/confirm_static boolean true
+d-i netcfg/get_hostname string hpc-compute01
+d-i netcfg/get_domain string hpc.local
+
+# Partitioning
+d-i partman-auto/disk string /dev/sda
+d-i partman-auto/method string regular
+d-i partman-auto/choose_recipe select atomic
+d-i partman-partitioning/confirm_write_new_label boolean true
+d-i partman/choose_partition select finish
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+
+# User setup
+d-i passwd/user-fullname string HPC User
+d-i passwd/username string hpcadmin
+d-i passwd/user-password password cluster123
+d-i passwd/user-password-again password cluster123
+d-i passwd/user-default-groups string adm dialout cdrom floppy sudo audio dip video plugdev netdev
+
+# Package selection
+tasksel tasksel/first multiselect server
+d-i pkgsel/include string openssh-server
+
+# Boot loader
+d-i grub-installer/only_debian boolean true
+d-i grub-installer/with_other_os boolean true
+
+# Post-installation commands
+d-i preseed/late_command string \
+    in-target systemctl enable ssh; \
+    echo "hpc-compute setup complete" > /target/var/log/hpc-install.log

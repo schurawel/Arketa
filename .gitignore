@@ -10,11 +10,64 @@ slurm-base.box
 tmp/*
 tmp/
 
+# Cubic workspace - generated files and artifacts
+cubic-workspace/original/
+cubic-workspace/new/
+cubic-workspace/output/
+cubic-workspace/temp/
+cubic-workspace/*.iso
+cubic-workspace/*.log
+
+# ISO files (except the base Ubuntu ISO if needed for reference)
+*.iso
+
 # Build and log files
 *.log
 *.out
 *.err
+*.debug
+
+# Slurm runtime and configuration artifacts
+slurm.conf.bak
+slurm-*.log
+slurmctld.pid
+slurmd.pid
+
+# HPC stack build artifacts
+go*.tar.gz
+apptainer-*.tar.gz
+slurm-*.tar.bz2
+
+# SSH keys and certificates
+*.pem
+*.key
+id_rsa*
+authorized_keys.backup
+
+# Backup files
+*.bak
+*.backup
+*~
+.#*
+
+# Editor temporary files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
 
 # OS specific files
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Python cache files (if any Python scripts are added)
+__pycache__/
+*.pyc
+*.pyo
+
+# Test output and artifacts
+test-output/
+test-results/
+*.test

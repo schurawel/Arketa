@@ -14,7 +14,7 @@ def get_base_box
       return "slurm-base"
     end
   end
-  return "hashicorp/bionic64"
+  return "ubuntu/jammy64"  # Ubuntu 22.04 LTS
 end
 
 BASE_BOX = get_base_box()
@@ -41,7 +41,7 @@ Vagrant.configure("2") do |config|
 
   # Base VM for creating Slurm base box (only when SLURM_BUILD_BASE=true)
   config.vm.define "base", autostart: false do |base|
-    base.vm.box = "hashicorp/bionic64"  # Always use Ubuntu for base building
+    base.vm.box = "ubuntu/jammy64"  # Always use Ubuntu 22.04 LTS for base building
     base.vm.hostname = "slurm-base"
     base.vm.network "private_network", ip: "192.168.60.100"
     
@@ -54,64 +54,14 @@ Vagrant.configure("2") do |config|
     # Sync folders for base building
     base.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", type: "rsync", rsync__exclude: [".git/", "*.o", "*.lo", "*.la"]
 
-    # Build base system with Slurm compiled
+    # Build base system with Slurm compiled using shared setup script
     base.vm.provision "shell", inline: <<-SHELL
-      echo "🏗️ Building Slurm base image..."
+      echo "🏗️ Building Slurm base image using shared setup script..."
       
-      # Update system
-      apt-get update
-      apt-get upgrade -y
+      # Run the shared HPC base setup script
+      /home/vagrant/scripts/setup-base.sh --clean-for-imaging
       
-      # Install all dependencies for both controller and compute nodes
-      apt-get install -y build-essential git autoconf automake libtool \
-          pkg-config libssl-dev libpam0g-dev libnuma-dev libhwloc-dev \
-          libfreeipmi-dev librrd-dev libncurses5-dev libreadline-dev \
-          python3-dev python3-pip munge libmunge-dev libmunge2 \
-          cmake wget curl vim nfs-kernel-server nfs-common chrony
-      
-      # Create slurm user
-      useradd -r -s /bin/false slurm || true
-      
-      # Build and install Slurm (done once for base image)
-      echo "📦 Compiling Slurm from source..."
-      
-      # Create build directory with proper ownership
-      mkdir -p /tmp/slurm-build
-      cp -r /home/vagrant/slurm-src/* /tmp/slurm-build/
-      chown -R vagrant:vagrant /tmp/slurm-build
-      cd /tmp/slurm-build
-      
-      # Make sure configure script is executable
-      chmod +x configure
-      
-      # Configure and build Slurm as vagrant user
-      sudo -u vagrant ./configure --prefix=/opt/slurm --sysconfdir=/etc/slurm \
-          --enable-pam --with-pam_dir=/lib/x86_64-linux-gnu/security/ \
-          --without-shared-libslurm 2>&1 | tee configure.log
-      
-      # Check if configure succeeded
-      if [ ! -f Makefile ]; then
-        echo "❌ Configure failed! Check configure.log:"
-        tail -20 configure.log
-        exit 1
-      fi
-      
-      sudo -u vagrant make -j$(nproc)
-      make install
-      
-      # Create necessary directories
-      mkdir -p /etc/slurm /var/spool/slurmctld /var/spool/slurmd /var/log/slurm /opt/slurm/var/run
-      chown -R slurm:slurm /var/spool/slurmctld /var/spool/slurmd /var/log/slurm /opt/slurm/var/run
-      
-      # Add Slurm binaries to PATH
-      echo 'export PATH="/opt/slurm/bin:/opt/slurm/sbin:$PATH"' > /etc/profile.d/slurm.sh
-      echo 'export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"' >> /etc/profile.d/slurm.sh
-      chmod +x /etc/profile.d/slurm.sh
-      
-      # Clean up build directory
-      rm -rf /tmp/slurm-build
-      
-      # Mark as base image
+      # Mark as base image (additional marker for Vagrant)
       echo "slurm-base-$(date +%Y%m%d)" > /etc/slurm-base-version
       
       echo "✅ Slurm base image ready!"
@@ -144,15 +94,9 @@ Vagrant.configure("2") do |config|
       hostnamectl set-hostname slurm-controller
       
       # Only install dependencies if not using base box
-      if [ "#{BASE_BOX}" = "hashicorp/bionic64" ]; then
-        echo "📦 Installing dependencies (not using base box)..."
-        apt-get update
-        apt-get upgrade -y
-        apt-get install -y build-essential git autoconf automake libtool \
-            pkg-config libssl-dev libpam0g-dev libnuma-dev libhwloc-dev \
-            libfreeipmi-dev librrd-dev libncurses5-dev libreadline-dev \
-            python3-dev python3-pip munge libmunge-dev libmunge2 \
-            cmake wget curl vim nfs-kernel-server chrony
+      if [ "#{BASE_BOX}" = "ubuntu/jammy64" ]; then
+        echo "📦 Installing dependencies using shared setup script..."
+        /home/vagrant/scripts/setup-base.sh
         useradd -r -s /bin/false slurm || true
       else
         echo "⚡ Using pre-built base box - skipping dependency installation"
@@ -202,15 +146,9 @@ Vagrant.configure("2") do |config|
         hostnamectl set-hostname node#{i}
         
         # Only install dependencies if not using base box
-        if [ "#{BASE_BOX}" = "hashicorp/bionic64" ]; then
-          echo "📦 Installing dependencies (not using base box)..."
-          apt-get update
-          apt-get upgrade -y
-          apt-get install -y build-essential git autoconf automake libtool \
-              pkg-config libssl-dev libpam0g-dev libnuma-dev libhwloc-dev \
-              libfreeipmi-dev librrd-dev libncurses5-dev libreadline-dev \
-              python3-dev python3-pip munge libmunge-dev libmunge2 \
-              libmariadb-dev cmake wget curl vim nfs-common chrony
+        if [ "#{BASE_BOX}" = "ubuntu/jammy64" ]; then
+          echo "📦 Installing dependencies using shared setup script..."
+          /home/vagrant/scripts/setup-base.sh
           useradd -r -s /bin/false slurm || true
         else
           echo "⚡ Using pre-built base box - skipping dependency installation"

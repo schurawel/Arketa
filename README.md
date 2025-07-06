@@ -271,9 +271,12 @@ MyCluster/
 ├── preflight-check-source.sh   # Pre-deployment validation
 │
 ├── scripts/                    # Provisioning scripts
+│   ├── setup-base.sh           # Shared HPC base installation (NEW)
 │   ├── setup-controller.sh     # Controller node setup
 │   ├── setup-compute.sh        # Compute node setup
 │   ├── setup-database.sh       # Database configuration
+│   ├── create-metal-iso.sh     # Bare metal ISO creation
+│   ├── simulate-metal.sh       # QEMU simulation for testing
 │   └── test-cluster.sh         # Job testing utilities
 │
 ├── sample-jobs/                # Example Slurm job scripts

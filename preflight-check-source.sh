@@ -34,10 +34,10 @@ echo
 
 # Check if running in correct directory
 print_status "Checking project directory..."
-if [[ -f "Vagrantfile" ]] && [[ -d "vagrant-src" ]]; then
-    print_success "Found Vagrantfile and vagrant-src directory"
+if [[ -f "Vagrantfile" ]] && [[ -d "tmp/vagrant-src" ]]; then
+    print_success "Found Vagrantfile and tmp/vagrant-src directory"
 else
-    print_error "Missing Vagrantfile or vagrant-src directory"
+    print_error "Missing Vagrantfile or tmp/vagrant-src directory"
     ERRORS=$((ERRORS + 1))
 fi
 

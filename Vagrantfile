@@ -29,7 +29,7 @@ Vagrant.configure("2") do |config|
   
   # Only sync slurm source if not using base box
   if BASE_BOX == "hashicorp/bionic64"
-    config.vm.synced_folder "./slurm", "/home/vagrant/slurm-src", type: "rsync", rsync__exclude: [".git/", "*.o", "*.lo", "*.la"]
+    config.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", type: "rsync", rsync__exclude: [".git/", "*.o", "*.lo", "*.la"]
   end
   
   # Global VM settings
@@ -52,7 +52,7 @@ Vagrant.configure("2") do |config|
     end
 
     # Sync folders for base building
-    base.vm.synced_folder "./slurm", "/home/vagrant/slurm-src", type: "rsync", rsync__exclude: [".git/", "*.o", "*.lo", "*.la"]
+    base.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", type: "rsync", rsync__exclude: [".git/", "*.o", "*.lo", "*.la"]
 
     # Build base system with Slurm compiled
     base.vm.provision "shell", inline: <<-SHELL
@@ -115,7 +115,7 @@ Vagrant.configure("2") do |config|
       echo "slurm-base-$(date +%Y%m%d)" > /etc/slurm-base-version
       
       echo "✅ Slurm base image ready!"
-      echo "📋 Slurm version: $(/opt/slurm/bin/sinfo --version)"
+      echo "📋 Slurm version: $(/opt/slurm/sbin/slurmctld -V 2>/dev/null | head -1 || echo 'Slurm installed successfully')"
     SHELL
   end
 

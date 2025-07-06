@@ -1,6 +1,20 @@
+# Vagrant runtime files
 .vagrant/*
+.vagrant/
+
+# Vagrant boxes and build artifacts
 slurm-base.box
-vagrant-src/*
-vagrant-src
-slurm
-slurm/*
+*.box
+
+# Repository directories - only in tmp/
+tmp/*
+tmp/
+
+# Build and log files
+*.log
+*.out
+*.err
+
+# OS specific files
+.DS_Store
+Thumbs.db

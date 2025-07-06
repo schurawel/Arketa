@@ -1,7 +1,7 @@
 #!/bin/bash
 # Vagrant wrapper script to use source-built version
 
-VAGRANT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/vagrant-src" && pwd)"
+VAGRANT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/tmp/vagrant-src" && pwd)"
 PROJECT_DIR="$(dirname "${BASH_SOURCE[0]}")"
 
 export VAGRANT_HOME="${HOME}/.vagrant.d"

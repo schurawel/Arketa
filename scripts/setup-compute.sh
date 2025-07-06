@@ -88,7 +88,7 @@ Requires=munge.service
 [Service]
 Type=forking
 EnvironmentFile=-/etc/default/slurmd
-ExecStart=/opt/slurm/sbin/slurmd -D
+ExecStart=/opt/slurm/sbin/slurmd
 ExecReload=/bin/kill -HUP $MAINPID
 PIDFile=/opt/slurm/var/run/slurmd.pid
 KillMode=process
@@ -107,10 +107,12 @@ cat > /etc/slurm/cgroup.conf << 'EOF'
 CgroupMountpoint="/sys/fs/cgroup"
 ConstrainCores=yes
 ConstrainRAMSpace=yes
-ConstrainSwapSpace=yes
+ConstrainSwapSpace=no
 ConstrainDevices=yes
-TaskAffinity=no
 EOF
+
+# Remove any problematic TaskAffinity lines that might exist
+sed -i '/TaskAffinity/d' /etc/slurm/cgroup.conf 2>/dev/null || true
 
 # Enable and start slurmd service
 systemctl daemon-reload

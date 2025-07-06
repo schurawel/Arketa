@@ -6,7 +6,7 @@
 .PHONY: test-python test-apptainer test-ml test-distributed test-extended
 .PHONY: show-job-output show-all-outputs show-latest-outputs
 .PHONY: build-vagrant build-base remove-base list-boxes preflight setup-repos
-.PHONY: metal sim-metal sim-metal-status sim-metal-stop sim-metal-clean sim-metal-connect
+.PHONY: metal sim-metal sim-metal-status sim-metal-stop sim-metal-clean sim-metal-connect metal-clean
 
 # Default target
 .DEFAULT_GOAL := help
@@ -42,6 +42,7 @@ help: ## 📋 Show this help message
 	@echo "$(YELLOW)🏗️ Bare Metal Deployment (Independent):$(NC)"
 	@echo "  $(BOLD)make metal$(NC)       - Create custom Ubuntu ISO for bare metal deployment"
 	@echo "  $(BOLD)make sim-metal$(NC)   - Simulate bare metal installation with QEMU"
+	@echo "  $(BOLD)make metal-clean$(NC) - Clean up ISO workspace and generated files"
 	@echo ""
 	@echo "$(BLUE)📊 Cluster Management:$(NC)"
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  $(BOLD)%-15s$(NC) %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -59,6 +60,7 @@ help: ## 📋 Show this help message
 	@echo "  make metal            # Create custom Ubuntu ISO (independent)"
 	@echo "  make sim-metal        # Test with QEMU simulation"
 	@echo "  make sim-metal-status # Check simulation status"
+	@echo "  make metal-clean      # Clean up ISO workspace"
 	@echo "  make clean            # Clean up completely"
 
 cluster: setup-repos preflight build-vagrant ## 🚀 Complete cluster setup using base box (recommended)
@@ -568,11 +570,12 @@ version: ## 📈 Show version information
 
 ## 🏗️ Bare Metal Deployment
 
-metal: setup-slurm-source ## 🏗️ Create custom Ubuntu ISO for bare metal deployment using Cubic
-	@echo "$(BOLD)🏗️ Creating HPC Cluster Metal ISO$(NC)"
-	@echo "=================================="
+metal: setup-slurm-source ## 🏗️ Create custom Ubuntu ISO for automated bare metal deployment
+	@echo "$(BOLD)🏗️ Creating HPC Cluster Custom ISO$(NC)"
+	@echo "====================================="
 	@echo ""
-	@echo "$(BLUE)[INFO]$(NC) This will create a custom Ubuntu ISO with HPC stack pre-installed"
+	@echo "$(BLUE)[INFO]$(NC) This will create a custom Ubuntu Desktop ISO with HPC stack pre-installed"
+	@echo "$(BLUE)[INFO]$(NC) Uses Ubuntu Desktop ISO for complete live system modification"
 	@echo "$(BLUE)[INFO]$(NC) The ISO can be used to deploy the cluster on bare metal servers"
 	@echo ""
 	@if [ ! -f "./scripts/create-metal-iso.sh" ]; then \
@@ -582,8 +585,7 @@ metal: setup-slurm-source ## 🏗️ Create custom Ubuntu ISO for bare metal dep
 	@chmod +x ./scripts/create-metal-iso.sh
 	@./scripts/create-metal-iso.sh
 	@echo ""
-	@echo "$(GREEN)[SUCCESS]$(NC) Metal ISO preparation complete!"
-	@echo "$(YELLOW)[NEXT]$(NC) Run 'sudo cubic' to create the custom ISO"
+	@echo "$(GREEN)[SUCCESS]$(NC) Custom HPC ISO creation complete!"
 
 sim-metal: ## 🖥️ Simulate bare metal installation using QEMU
 	@echo "$(BOLD)🖥️ Starting HPC Cluster Metal Simulation$(NC)"
@@ -625,6 +627,21 @@ sim-metal-connect: ## 🔗 Show VNC connection info for QEMU simulation
 		exit 1; \
 	fi
 	@./scripts/simulate-metal.sh connect
+
+metal-clean: ## 🧹 Clean up ISO workspace and generated files
+	@echo "$(BLUE)[INFO]$(NC) Cleaning up ISO workspace and generated files..."
+	@echo "$(YELLOW)[CLEANUP]$(NC) Removing temporary ISO creation directories..."
+	@sudo rm -rf iso-workspace/iso-extract iso-workspace/iso-rebuild iso-workspace/squashfs-root 2>/dev/null || true
+	@rm -f iso-workspace/.squashfs_filename iso-workspace/install-hpc-stack.sh iso-workspace/grub.cfg 2>/dev/null || true
+	@echo "$(YELLOW)[CLEANUP]$(NC) Unmounting any mounted ISOs..."
+	@sudo umount /mnt 2>/dev/null || true
+	@echo "$(YELLOW)[CLEANUP]$(NC) Removing generated ISO files..."
+	@rm -f ubuntu-22.04-hpc-cluster.iso 2>/dev/null || true
+	@echo "$(YELLOW)[CLEANUP]$(NC) Cleaning up QEMU simulation workspace..."
+	@if [ -f "./scripts/simulate-metal.sh" ]; then \
+		./scripts/simulate-metal.sh clean 2>/dev/null || true; \
+	fi
+	@echo "$(GREEN)[SUCCESS]$(NC) ISO workspace cleaned up!"
 
 # Error handling for missing files
 $(VAGRANT_WRAPPER):

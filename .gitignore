@@ -10,13 +10,19 @@ slurm-base.box
 tmp/*
 tmp/
 
-# Cubic workspace - generated files and artifacts
-cubic-workspace/original/
-cubic-workspace/new/
-cubic-workspace/output/
-cubic-workspace/temp/
-cubic-workspace/*.iso
-cubic-workspace/*.log
+# ISO workspace - generated files and artifacts
+iso-workspace/original/
+iso-workspace/new/
+iso-workspace/output/
+iso-workspace/temp/
+iso-workspace/iso-extract/
+iso-workspace/iso-rebuild/
+iso-workspace/squashfs-root/
+iso-workspace/*.iso
+iso-workspace/*.log
+iso-workspace/install-hpc-stack.sh
+iso-workspace/grub.cfg
+iso-workspace/.squashfs_filename
 
 # ISO files (except the base Ubuntu ISO if needed for reference)
 *.iso

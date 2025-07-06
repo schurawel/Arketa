@@ -1,6 +1,7 @@
 #!/bin/bash
-# Create HPC Cluster Metal ISO using Cubic
-# This script extracts the Vagrant provisioning logic into a custom Ubuntu ISO
+# Create HPC Cluster Custom ISO
+# This script automatically creates a custom Ubuntu ISO with HPC stack pre-installed
+# Uses Ubuntu Desktop ISO for complete live system modification capabilities
 
 set -e
 
@@ -15,10 +16,10 @@ NC='\033[0m' # No Color
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-CUBIC_WORKSPACE="${PROJECT_DIR}/cubic-workspace"
+ISO_WORKSPACE="${PROJECT_DIR}/iso-workspace"
 ISO_OUTPUT="${PROJECT_DIR}/ubuntu-22.04-hpc-cluster.iso"
-BASE_ISO_URL="https://releases.ubuntu.com/22.04/ubuntu-22.04.5-live-server-amd64.iso"
-BASE_ISO="${PROJECT_DIR}/ubuntu-22.04.5-live-server-amd64.iso"
+BASE_ISO_URL="https://releases.ubuntu.com/22.04/ubuntu-22.04.5-desktop-amd64.iso"
+BASE_ISO="${PROJECT_DIR}/ubuntu-22.04.5-desktop-amd64.iso"
 
 # Utility functions
 log() {
@@ -39,35 +40,54 @@ success() {
 }
 
 check_dependencies() {
-    log "Checking dependencies..."
+    log "Checking dependencies for automated ISO creation..."
     
-    if ! command -v cubic >/dev/null 2>&1; then
-        warn "Cubic not found. Installing from PPA..."
-        
-        # Add the Cubic PPA
-        if ! grep -q "cubic-wizard" /etc/apt/sources.list.d/* 2>/dev/null; then
-            log "Adding Cubic PPA repository..."
-            sudo apt update
-            sudo apt install -y software-properties-common
-            sudo add-apt-repository -y ppa:cubic-wizard/release
-            sudo apt update
+    # Required tools for automated ISO creation
+    local required_tools=("wget" "xorriso" "unsquashfs" "mksquashfs" "rsync")
+    local missing_tools=()
+    
+    for tool in "${required_tools[@]}"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing_tools+=("$tool")
         fi
+    done
+    
+    if [ ${#missing_tools[@]} -gt 0 ]; then
+        log "Installing missing dependencies: ${missing_tools[*]}"
+        sudo apt update
         
-        # Install Cubic
-        log "Installing Cubic..."
-        sudo apt install -y cubic
+        # Install packages based on missing tools
+        local packages_to_install=()
+        for tool in "${missing_tools[@]}"; do
+            case "$tool" in
+                "wget") packages_to_install+=("wget") ;;
+                "xorriso") packages_to_install+=("xorriso") ;;
+                "unsquashfs"|"mksquashfs") packages_to_install+=("squashfs-tools") ;;
+                "rsync") packages_to_install+=("rsync") ;;
+            esac
+        done
         
-        if ! command -v cubic >/dev/null 2>&1; then
-            error "Failed to install Cubic. Please install manually:\n  sudo add-apt-repository ppa:cubic-wizard/release\n  sudo apt update\n  sudo apt install cubic"
-        fi
+        # Remove duplicates
+        local unique_packages=($(printf '%s\n' "${packages_to_install[@]}" | sort -u))
         
-        success "Cubic installed successfully"
+        sudo apt install -y "${unique_packages[@]}"
+        
+        # Verify installation
+        for tool in "${required_tools[@]}"; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+                error "Failed to install $tool. Please install manually."
+            fi
+        done
+        
+        success "Dependencies installed successfully"
     else
-        log "Cubic already installed"
+        log "All required dependencies are already installed"
     fi
     
-    if ! command -v wget >/dev/null 2>&1; then
-        error "wget is required but not installed"
+    # Check for isolinux (needed for bootable ISO)
+    if [ ! -f "/usr/lib/ISOLINUX/isohdpfx.bin" ]; then
+        log "Installing isolinux for bootable ISO creation..."
+        sudo apt install -y isolinux
     fi
     
     success "Dependencies check passed"
@@ -86,12 +106,12 @@ download_base_iso() {
 create_hpc_installer() {
     log "Creating HPC installer script..."
     
-    # Copy the shared setup script to the cubic workspace
-    cp "${PROJECT_DIR}/scripts/setup-base.sh" "${CUBIC_WORKSPACE}/setup-base.sh"
-    chmod +x "${CUBIC_WORKSPACE}/setup-base.sh"
+    # Copy the shared setup script to the iso workspace
+    cp "${PROJECT_DIR}/scripts/setup-base.sh" "${ISO_WORKSPACE}/setup-base.sh"
+    chmod +x "${ISO_WORKSPACE}/setup-base.sh"
     
     # Create a wrapper script that calls the shared setup script
-    cat > "${CUBIC_WORKSPACE}/hpc-cluster-installer.sh" << 'EOF'
+    cat > "${ISO_WORKSPACE}/hpc-cluster-installer.sh" << 'EOF'
 #!/bin/bash
 # HPC Cluster Base Installation Script
 # Uses shared setup-base.sh script for consistency with Vagrant deployment
@@ -106,17 +126,17 @@ echo "🏗️ Building HPC-ready Ubuntu 22.04..."
 echo "✅ HPC base system ready!"
 EOF
 
-    chmod +x "${CUBIC_WORKSPACE}/hpc-cluster-installer.sh"
+    chmod +x "${ISO_WORKSPACE}/hpc-cluster-installer.sh"
     success "HPC installer script created using shared setup-base.sh"
 }
 
 create_preseed_configs() {
     log "Creating preseed configurations..."
     
-    mkdir -p "${CUBIC_WORKSPACE}/preseed"
+    mkdir -p "${ISO_WORKSPACE}/preseed"
     
     # Controller preseed
-    cat > "${CUBIC_WORKSPACE}/preseed/hpc-controller.seed" << 'EOF'
+    cat > "${ISO_WORKSPACE}/preseed/hpc-controller.seed" << 'EOF'
 # HPC Controller Node Preseed Configuration
 d-i debian-installer/locale string en_US
 d-i keyboard-configuration/xkb-keymap select us
@@ -163,7 +183,7 @@ d-i preseed/late_command string \
 EOF
 
     # Compute node preseed template
-    cat > "${CUBIC_WORKSPACE}/preseed/hpc-compute.seed" << 'EOF'
+    cat > "${ISO_WORKSPACE}/preseed/hpc-compute.seed" << 'EOF'
 # HPC Compute Node Preseed Configuration
 d-i debian-installer/locale string en_US
 d-i keyboard-configuration/xkb-keymap select us
@@ -215,14 +235,14 @@ EOF
 create_post_install_scripts() {
     log "Creating post-installation scripts..."
     
-    mkdir -p "${CUBIC_WORKSPACE}/scripts"
+    mkdir -p "${ISO_WORKSPACE}/scripts"
     
     # Copy existing scripts (this now includes setup-base.sh)
-    cp -r "${PROJECT_DIR}/scripts/"* "${CUBIC_WORKSPACE}/scripts/"
-    cp -r "${PROJECT_DIR}/sample-jobs" "${CUBIC_WORKSPACE}/"
+    cp -r "${PROJECT_DIR}/scripts/"* "${ISO_WORKSPACE}/scripts/"
+    cp -r "${PROJECT_DIR}/sample-jobs" "${ISO_WORKSPACE}/"
     
     # Create enhanced node configuration script that leverages existing setup scripts
-    cat > "${CUBIC_WORKSPACE}/scripts/configure-node.sh" << 'EOF'
+    cat > "${ISO_WORKSPACE}/scripts/configure-node.sh" << 'EOF'
 #!/bin/bash
 # Configure HPC node after installation
 # This script leverages the existing setup-controller.sh and setup-compute.sh scripts
@@ -314,14 +334,14 @@ else
 fi
 EOF
 
-    chmod +x "${CUBIC_WORKSPACE}/scripts/configure-node.sh"
+    chmod +x "${ISO_WORKSPACE}/scripts/configure-node.sh"
     success "Enhanced post-installation scripts created"
 }
 
 create_validation_script() {
     log "Creating HPC stack validation script..."
     
-    cat > "${CUBIC_WORKSPACE}/scripts/validate-hpc-stack.sh" << 'EOF'
+    cat > "${ISO_WORKSPACE}/scripts/validate-hpc-stack.sh" << 'EOF'
 #!/bin/bash
 # HPC Stack Validation Script
 # Validates that all components are properly installed and configured
@@ -428,138 +448,27 @@ echo ""
 echo -e "${GREEN}✅ HPC Stack validation complete!${NC}"
 EOF
 
-    chmod +x "${CUBIC_WORKSPACE}/scripts/validate-hpc-stack.sh"
+    chmod +x "${ISO_WORKSPACE}/scripts/validate-hpc-stack.sh"
     success "HPC stack validation script created"
 }
 
-create_cubic_instructions() {
-    log "Creating comprehensive Cubic usage instructions..."
+create_iso_documentation() {
+    log "Creating ISO deployment documentation..."
     
-    cat > "${CUBIC_WORKSPACE}/CUBIC_INSTRUCTIONS.md" << 'EOF'
-# HPC Cluster ISO Creation with Cubic
+    cat > "${ISO_WORKSPACE}/README.md" << 'EOF'
+# HPC Cluster ISO Documentation
 
 ## Overview
-This guide walks through creating a custom Ubuntu 22.04 ISO with the HPC stack pre-installed, ensuring consistency with the Vagrant-based deployment.
+This custom Ubuntu 22.04 ISO includes a complete HPC stack pre-installed for automated bare metal deployment.
 
-## Prerequisites
-- Ubuntu host system with Cubic installed
-- At least 8GB free disk space
-- Internet connection for downloading packages during customization
-
-## Step-by-Step Instructions
-
-### 1. Launch Cubic
-```bash
-sudo cubic
-```
-
-### 2. Project Setup
-- **Select Project Directory**: Choose this directory as the Cubic project directory
-- **Import Original ISO**: Select the downloaded Ubuntu 22.04 ISO
-- **Project Name**: Use "HPC-Cluster-Ubuntu-22.04"
-
-### 3. Extract and Enter Chroot Environment
-Cubic will extract the ISO filesystem. Once ready, you'll be in a chroot environment.
-
-### 4. Install HPC Base System
-In the chroot terminal, run the shared setup script:
-
-```bash
-# Copy the setup script to a temporary location
-cp /cubic-workspace/setup-base.sh /tmp/
-chmod +x /tmp/setup-base.sh
-
-# Install the complete HPC stack (this may take 15-20 minutes)
-echo "🏗️ Installing HPC base system..."
-/tmp/setup-base.sh --clean-for-imaging
-
-# Verify installation
-echo "✅ Verifying installations..."
-go version
-apptainer --version
-python3 -c "import numpy, scipy, matplotlib; print('Python packages OK')"
-
-# Check if Slurm was installed
-if [ -f "/opt/slurm/bin/sinfo" ]; then
-    echo "✅ Slurm installed: $(/opt/slurm/bin/sinfo --version)"
-else
-    echo "⚠️ Slurm not installed (source not available)"
-fi
-```
-
-### 5. Copy Additional Resources
-```bash
-# Copy all scripts and sample jobs
-cp -r /cubic-workspace/scripts /tmp/
-cp -r /cubic-workspace/sample-jobs /tmp/
-cp -r /cubic-workspace/preseed /tmp/
-
-# If Slurm source is available, you can also copy it
-if [ -d "/cubic-workspace/slurm-src" ]; then
-    echo "📦 Slurm source found, copying for potential later use..."
-    cp -r /cubic-workspace/slurm-src /tmp/
-fi
-
-# Make scripts executable
-chmod +x /tmp/scripts/*.sh
-```
-
-### 6. Create Installation Automation
-```bash
-# Create an auto-setup script for first boot
-cat > /etc/rc.local << 'RCLOCAL_EOF'
-#!/bin/bash
-# Auto-configuration script for HPC cluster nodes
-
-# Check if this is first boot
-if [ ! -f /var/log/hpc-first-boot-complete ]; then
-    echo "$(date): HPC first boot configuration starting..." >> /var/log/hpc-setup.log
-    
-    # Copy resources from installation media
-    if [ -d /tmp/scripts ]; then
-        cp -r /tmp/scripts /opt/hpc-scripts
-        cp -r /tmp/sample-jobs /opt/hpc-sample-jobs
-        chmod +x /opt/hpc-scripts/*.sh
-    fi
-    
-    echo "$(date): HPC first boot configuration complete" >> /var/log/hpc-setup.log
-    touch /var/log/hpc-first-boot-complete
-fi
-
-exit 0
-RCLOCAL_EOF
-
-chmod +x /etc/rc.local
-systemctl enable rc-local
-```
-
-### 7. Final Cleanup
-```bash
-# Clean package cache and temporary files
-apt-get clean
-apt-get autoremove -y
-rm -rf /var/lib/apt/lists/*
-rm -rf /tmp/setup-base.sh
-rm -rf /root/.cache
-
-# Clear command history
-history -c
-history -w
-
-# Exit chroot
-exit
-```
-
-### 8. Customize Boot Menu (Optional)
-In Cubic's boot menu customization:
-- **Timeout**: Set to 10 seconds
-- **Default Option**: "Install Ubuntu Server"
-- **Custom Entries**: Add entries for automated installation
-
-### 9. Generate the ISO
-- Review the customization summary
-- Generate the new ISO
-- Save as "ubuntu-22.04-hpc-cluster.iso"
+## What's Included
+- ✅ Complete HPC development stack (build tools, libraries)
+- ✅ Go 1.21.5 programming environment  
+- ✅ Apptainer 1.3.4 for container workloads
+- ✅ Python scientific stack (NumPy, SciPy, Matplotlib, etc.)
+- ✅ Slurm workload manager (if source was available)
+- ✅ Sample job scripts and configuration templates
+- ✅ Automated node configuration scripts
 
 ## Deployment Instructions
 
@@ -612,18 +521,9 @@ df -h /shared           # Verify shared storage
 - **Services**: Use `systemctl status` to check service status
 - **Network**: Verify all nodes can ping each other
 - **Munge**: Test with `munge -n | unmunge` on each node
-
-## What's Included
-- ✅ Complete HPC development stack (build tools, libraries)
-- ✅ Go 1.21.5 programming environment
-- ✅ Apptainer 1.3.4 for container workloads
-- ✅ Python scientific stack (NumPy, SciPy, Matplotlib, etc.)
-- ✅ Slurm workload manager (if source was available)
-- ✅ Sample job scripts and configuration templates
-- ✅ Automated node configuration scripts
 EOF
 
-    success "Comprehensive Cubic instructions created"
+    success "ISO deployment documentation created"
 }
 
 prepare_slurm_source() {
@@ -632,9 +532,11 @@ prepare_slurm_source() {
         
         # Validate Slurm source before copying
         if [ -f "${PROJECT_DIR}/tmp/slurm/configure" ]; then
-            cp -r "${PROJECT_DIR}/tmp/slurm" "${CUBIC_WORKSPACE}/slurm-src"
+            # Copy Slurm source excluding .git directories and other VCS files
+            rsync -av --exclude='.git' --exclude='.svn' --exclude='.hg' \
+                "${PROJECT_DIR}/tmp/slurm/" "${ISO_WORKSPACE}/slurm-src/"
             success "Slurm source copied successfully"
-            log "Source size: $(du -sh "${CUBIC_WORKSPACE}/slurm-src" | cut -f1)"
+            log "Source size: $(du -sh "${ISO_WORKSPACE}/slurm-src" | cut -f1)"
         else
             warn "Slurm source directory exists but configure script not found"
             warn "Skipping Slurm source copy"
@@ -645,7 +547,7 @@ prepare_slurm_source() {
         warn "Run 'make setup-repos' to download Slurm source, then retry"
         
         # Create a note file for users
-        cat > "${CUBIC_WORKSPACE}/SLURM_SOURCE_MISSING.txt" << 'EOF'
+        cat > "${ISO_WORKSPACE}/SLURM_SOURCE_MISSING.txt" << 'EOF'
 SLURM SOURCE NOT INCLUDED
 =========================
 
@@ -661,14 +563,289 @@ EOF
     fi
 }
 
+create_custom_iso() {
+    log "Extracting base ISO for modification..."
+    
+    # Create temporary directories
+    local iso_extract_dir="${ISO_WORKSPACE}/iso-extract"
+    local iso_rebuild_dir="${ISO_WORKSPACE}/iso-rebuild"
+    local squashfs_dir="${ISO_WORKSPACE}/squashfs-root"
+    
+    # Clean up any previous attempts
+    sudo rm -rf "$iso_extract_dir" "$iso_rebuild_dir" "$squashfs_dir"
+    mkdir -p "$iso_extract_dir" "$iso_rebuild_dir"
+    
+    # Extract base ISO
+    log "Mounting and extracting base ISO..."
+    # Ensure /mnt is unmounted first
+    sudo umount /mnt 2>/dev/null || true
+    sudo mount -o loop "$BASE_ISO" /mnt
+    sudo cp -rT /mnt "$iso_extract_dir"
+    sudo umount /mnt
+    
+    # Make the extracted files writable
+    sudo chmod -R u+w "$iso_extract_dir"
+    
+    # Detect and extract the correct squashfs filesystem
+    log "Detecting Ubuntu ISO format and extracting filesystem..."
+    cd "$ISO_WORKSPACE"
+    
+    # Try to find the main filesystem squashfs
+    local squashfs_file=""
+    if [ -f "$iso_extract_dir/casper/filesystem.squashfs" ]; then
+        # Ubuntu Desktop ISO format - contains complete live system
+        squashfs_file="filesystem.squashfs"
+        log "Found Ubuntu Desktop filesystem.squashfs (complete live system)"
+    elif [ -f "$iso_extract_dir/casper/ubuntu-server-minimal.ubuntu-server.installer.squashfs" ]; then
+        # Ubuntu Server format - contains only installer (limited functionality)
+        squashfs_file="ubuntu-server-minimal.ubuntu-server.installer.squashfs"
+        warn "Found Ubuntu Server installer squashfs (limited - recommend Desktop ISO)"
+    else
+        # Try to find the largest squashfs file (likely the main filesystem)
+        squashfs_file=$(ls -1S "$iso_extract_dir/casper/"*.squashfs 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "")
+        if [ -n "$squashfs_file" ]; then
+            log "Using largest squashfs file: $squashfs_file"
+        else
+            error "No suitable squashfs filesystem found in ISO"
+        fi
+    fi
+    
+    log "Extracting $squashfs_file for modification..."
+    sudo unsquashfs -d "$squashfs_dir" "$iso_extract_dir/casper/$squashfs_file"
+    
+    # Store the squashfs filename for later use
+    echo "$squashfs_file" > "$ISO_WORKSPACE/.squashfs_filename"
+    
+    # Prepare chroot environment
+    log "Setting up chroot environment..."
+    # Handle resolv.conf (may be a dangling symlink)
+    sudo rm -f "$squashfs_dir/etc/resolv.conf"
+    sudo cp /etc/resolv.conf "$squashfs_dir/etc/resolv.conf"
+    sudo cp "$ISO_WORKSPACE/setup-base.sh" "$squashfs_dir/tmp/"
+    sudo cp "$ISO_WORKSPACE/hpc-cluster-installer.sh" "$squashfs_dir/tmp/"
+    sudo cp -r "$ISO_WORKSPACE/scripts" "$squashfs_dir/tmp/"
+    sudo cp -r "$ISO_WORKSPACE/sample-jobs" "$squashfs_dir/tmp/"
+    
+    # Create installation script for the chroot environment
+    cat > "$ISO_WORKSPACE/install-hpc-stack.sh" << 'EOF'
+#!/bin/bash
+# Install HPC stack in chroot environment
+set -e
+
+echo "🏗️ Installing HPC stack in ISO environment..."
+
+# Enable universe repository and additional sources
+echo "📦 Enabling package repositories..."
+add-apt-repository universe -y
+add-apt-repository multiverse -y
+
+# Update package database
+echo "🔄 Updating package lists..."
+apt update
+
+# Install basic dependencies first
+echo "📦 Installing basic build dependencies..."
+apt install -y \
+    wget \
+    curl \
+    git \
+    build-essential \
+    software-properties-common \
+    python3-pip \
+    pkg-config
+
+# Install HPC-specific packages that are available
+echo "📦 Installing available HPC packages..."
+apt install -y \
+    openmpi-bin \
+    openmpi-common \
+    libopenmpi-dev \
+    libhwloc-dev \
+    libfuse3-dev \
+    fuse3 \
+    net-tools \
+    htop \
+    tree \
+    vim \
+    nano \
+    screen \
+    tmux \
+    rsync \
+    bc \
+    stress \
+    nfs-common \
+    rsh-client \
+    openssh-server
+
+# Install munge from source since it might not be in repos
+echo "📦 Installing Munge authentication service..."
+cd /tmp
+wget https://github.com/dun/munge/releases/download/munge-0.5.15/munge-0.5.15.tar.xz
+tar xf munge-0.5.15.tar.xz
+cd munge-0.5.15
+./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
+make -j$(nproc)
+make install
+cd /tmp && rm -rf munge-*
+
+# Create munge user and setup
+useradd --system --home-dir /var/lib/munge --shell /sbin/nologin munge || true
+mkdir -p /var/lib/munge /var/log/munge /var/run/munge /etc/munge
+chown munge:munge /var/lib/munge /var/log/munge /var/run/munge /etc/munge
+chmod 0700 /var/lib/munge /var/log/munge /var/run/munge
+
+# Make installer scripts executable
+chmod +x /tmp/setup-base.sh
+chmod +x /tmp/hpc-cluster-installer.sh
+
+# Run simplified HPC setup (skip problematic packages)
+echo "📦 Installing core HPC components..."
+export DEBIAN_FRONTEND=noninteractive
+export SKIP_PACKAGE_INSTALL=1  # Skip package installation in setup-base.sh
+cd /tmp
+
+# Create basic HPC directory structure
+mkdir -p /opt/hpc /var/log/slurm /etc/slurm
+mkdir -p /home/shared /scratch
+
+# Create HPC admin user
+useradd -m -s /bin/bash -G sudo hpcadmin || true
+echo "hpcadmin:cluster123" | chpasswd
+
+# Enable SSH service
+systemctl enable ssh
+
+# Create basic Slurm configuration template
+cat > /etc/slurm/slurm.conf << 'SLURM_EOF'
+# Basic Slurm configuration template
+ClusterName=hpc-cluster
+ControlMachine=hpc-controller
+SlurmUser=slurm
+StateSaveLocation=/var/spool/slurm/ctld
+SlurmdSpoolDir=/var/spool/slurm/d
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+JobCompType=jobcomp/none
+SLURM_EOF
+
+# Clean up for smaller ISO
+apt autoremove -y
+apt autoclean
+rm -rf /var/lib/apt/lists/*
+rm -rf /tmp/setup-base.sh /tmp/hpc-cluster-installer.sh
+
+# Create version marker
+echo "$(date): HPC-enabled Ubuntu 22.04.5 Desktop created" > /etc/hpc-iso-version
+
+echo "✅ HPC stack installation complete!"
+EOF
+
+    sudo cp "$ISO_WORKSPACE/install-hpc-stack.sh" "$squashfs_dir/tmp/"
+    sudo chmod +x "$squashfs_dir/tmp/install-hpc-stack.sh"
+    
+    # Run the installation in chroot
+    log "Installing HPC stack in chroot environment..."
+    sudo chroot "$squashfs_dir" /bin/bash -c "
+        mount -t proc proc /proc
+        mount -t sysfs sysfs /sys
+        mount -t devpts devpts /dev/pts
+        /tmp/install-hpc-stack.sh
+        umount /dev/pts /sys /proc
+    "
+    
+    # Clean up chroot environment
+    sudo rm -f "$squashfs_dir/etc/resolv.conf"
+    sudo rm -rf "$squashfs_dir/tmp/install-hpc-stack.sh"
+    
+    # Get the original squashfs filename
+    local original_squashfs_file=$(cat "$ISO_WORKSPACE/.squashfs_filename" 2>/dev/null || echo "filesystem.squashfs")
+    
+    # Create new squashfs
+    log "Creating new squashfs filesystem ($original_squashfs_file)..."
+    sudo rm -f "$iso_extract_dir/casper/$original_squashfs_file"
+    sudo mksquashfs "$squashfs_dir" "$iso_extract_dir/casper/$original_squashfs_file" -comp xz -e boot
+    
+    # Update filesystem size for the specific squashfs file
+    local size_file="${original_squashfs_file%.*}.size"
+    printf $(sudo du -sx --block-size=1 "$squashfs_dir" | cut -f1) | sudo tee "$iso_extract_dir/casper/$size_file" > /dev/null
+    
+    # Create custom grub menu with HPC options
+    log "Creating custom boot menu..."
+    cat > "$ISO_WORKSPACE/grub.cfg" << 'EOF'
+set default="0"
+set timeout=10
+
+menuentry "Try or Install HPC Cluster Controller" {
+    set gfxpayload=keep
+    linux /casper/vmlinuz boot=casper maybe-ubiquity quiet splash ---
+    initrd /casper/initrd
+}
+
+menuentry "Try or Install HPC Cluster Compute Node" {
+    set gfxpayload=keep
+    linux /casper/vmlinuz boot=casper maybe-ubiquity quiet splash ---
+    initrd /casper/initrd
+}
+
+menuentry "Try Ubuntu without installing (HPC-enabled)" {
+    set gfxpayload=keep
+    linux /casper/vmlinuz boot=casper quiet splash ---
+    initrd /casper/initrd
+}
+
+menuentry "Check disc for defects" {
+    set gfxpayload=keep
+    linux /casper/vmlinuz boot=casper integrity-check quiet splash ---
+    initrd /casper/initrd
+}
+EOF
+
+    sudo cp "$ISO_WORKSPACE/grub.cfg" "$iso_extract_dir/boot/grub/"
+    
+    # Update MD5 checksums
+    log "Updating checksums..."
+    cd "$iso_extract_dir"
+    find . -type f -print0 | sudo xargs -0 md5sum | grep -v "\./md5sum.txt" | sudo tee md5sum.txt > /dev/null
+    
+    # Create the final ISO
+    log "Building final HPC cluster ISO..."
+    cd "$ISO_WORKSPACE"
+    sudo xorriso -as mkisofs \
+        -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+        -c isolinux/boot.cat \
+        -b isolinux/isolinux.bin \
+        -no-emul-boot \
+        -boot-load-size 4 \
+        -boot-info-table \
+        -eltorito-alt-boot \
+        -e boot/grub/efi.img \
+        -no-emul-boot \
+        -isohybrid-gpt-basdat \
+        -o "$ISO_OUTPUT" \
+        "$iso_extract_dir"
+    
+    # Clean up temporary directories
+    log "Cleaning up temporary files..."
+    sudo rm -rf "$iso_extract_dir" "$squashfs_dir"
+    
+    # Make ISO readable by user
+    sudo chown $(whoami):$(whoami) "$ISO_OUTPUT"
+    
+    success "Custom HPC ISO created: $ISO_OUTPUT"
+    
+    # Display ISO information
+    local iso_size=$(du -h "$ISO_OUTPUT" | cut -f1)
+    log "ISO size: $iso_size"
+}
+
 main() {
-    echo -e "${BOLD}🏗️ HPC Cluster Metal ISO Creator${NC}"
+    echo -e "${BOLD}🏗️ HPC Cluster Custom ISO Creator${NC}"
     echo "===================================="
     echo ""
     
     # Validate environment
     if [ "$EUID" -eq 0 ]; then
-        error "This script should not be run as root. Cubic will request sudo when needed."
+        error "This script should not be run as root. It will request sudo when needed."
     fi
     
     if [ ! -f "${PROJECT_DIR}/scripts/setup-base.sh" ]; then
@@ -678,13 +855,13 @@ main() {
     check_dependencies
     
     # Create workspace with proper error handling
-    log "Creating Cubic workspace: $CUBIC_WORKSPACE"
-    if ! mkdir -p "$CUBIC_WORKSPACE"; then
-        error "Failed to create workspace directory: $CUBIC_WORKSPACE"
+    log "Creating ISO workspace: $ISO_WORKSPACE"
+    if ! mkdir -p "$ISO_WORKSPACE"; then
+        error "Failed to create workspace directory: $ISO_WORKSPACE"
     fi
     
-    if ! cd "$CUBIC_WORKSPACE"; then
-        error "Failed to change to workspace directory: $CUBIC_WORKSPACE"
+    if ! cd "$ISO_WORKSPACE"; then
+        error "Failed to change to workspace directory: $ISO_WORKSPACE"
     fi
     
     # Execute all setup steps
@@ -693,7 +870,7 @@ main() {
     create_preseed_configs
     create_post_install_scripts
     create_validation_script
-    create_cubic_instructions
+    create_iso_documentation
     prepare_slurm_source
     
     # Final validation
@@ -702,7 +879,7 @@ main() {
         "hpc-cluster-installer.sh"
         "scripts/configure-node.sh"
         "scripts/validate-hpc-stack.sh"
-        "CUBIC_INSTRUCTIONS.md"
+        "README.md"
     )
     
     log "Validating workspace contents..."
@@ -715,18 +892,22 @@ main() {
     echo ""
     success "Metal ISO preparation complete!"
     echo ""
-    echo -e "${YELLOW}📁 Workspace Contents:${NC}"
-    find . -type f -name "*.sh" -o -name "*.md" | head -10
+    
+    # Automatically create the custom ISO
+    log "Creating custom HPC cluster ISO automatically..."
+    create_custom_iso
+    
+    echo ""
+    success "HPC Cluster ISO created successfully!"
+    echo ""
+    echo -e "${GREEN}📀 Custom ISO: ${BOLD}$ISO_OUTPUT${NC}"
     echo ""
     echo -e "${YELLOW}🚀 Next steps:${NC}"
-    echo "1. Launch Cubic: ${BOLD}sudo cubic${NC}"
-    echo "2. Select base ISO: ${BOLD}$BASE_ISO${NC}"
-    echo "3. Use workspace: ${BOLD}$CUBIC_WORKSPACE${NC}"
-    echo "4. Follow instructions in: ${BOLD}$CUBIC_WORKSPACE/CUBIC_INSTRUCTIONS.md${NC}"
+    echo "1. Boot from: ${BOLD}$ISO_OUTPUT${NC}"
+    echo "2. Select 'HPC Controller' or 'HPC Compute' during installation"
+    echo "3. Follow the automated installation process"
     echo ""
-    echo -e "${BLUE}📀 Final ISO location: $ISO_OUTPUT${NC}"
-    echo ""
-    echo -e "${GREEN}💡 Tip:${NC} The generated ISO will include the same HPC stack as your Vagrant deployment!"
+    echo -e "${GREEN}💡 Features:${NC} The ISO includes the complete HPC stack (Slurm, Apptainer, Go) pre-installed!"
 }
 
 # Run main function

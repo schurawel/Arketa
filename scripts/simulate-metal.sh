@@ -116,24 +116,64 @@ select_iso() {
     local iso_path=""
     
     if [ -f "$CUSTOM_ISO" ]; then
-        log "Found custom HPC ISO: $CUSTOM_ISO"
+        log "Found custom HPC ISO: $CUSTOM_ISO" >&2
         echo "$CUSTOM_ISO"
     elif [ -f "$BASE_ISO" ]; then
-        log "Using base Ubuntu ISO: $BASE_ISO"
+        log "Using base Ubuntu ISO: $BASE_ISO" >&2
         echo "$BASE_ISO"
     else
         error "No ISO found. Please create metal ISO first with 'make metal' or download base ISO."
     fi
 }
 
+check_kvm_access() {
+    # Check if KVM is available and accessible
+    if [ -c /dev/kvm ]; then
+        # Check if user has access to KVM
+        if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            return 0
+        elif groups | grep -q kvm; then
+            return 0
+        else
+            # User might need to be in kvm group
+            if ! groups | grep -q kvm; then
+                warn "User not in kvm group. Adding user to kvm group..."
+                if sudo usermod -a -G kvm $USER; then
+                    warn "User added to kvm group. You may need to log out and back in for full effect."
+                    # For now, we'll continue with TCG
+                    return 1
+                fi
+            fi
+        fi
+    fi
+    return 1
+}
+
 start_controller() {
     local iso_path="$1"
     log "Starting controller VM..."
     
+    # Detect available acceleration
+    local accel="tcg"
+    local cpu_type="qemu64"
+    
+    if check_kvm_access; then
+        # Test if KVM actually works
+        if timeout 5 qemu-system-x86_64 -accel kvm -machine type=none -nographic -serial none -monitor none -display none </dev/null >/dev/null 2>&1; then
+            accel="kvm:tcg"
+            cpu_type="host"
+            log "Using KVM acceleration"
+        else
+            warn "KVM device exists but not functional, using TCG (slower performance)"
+        fi
+    else
+        warn "KVM not available, using TCG (slower performance)"
+    fi
+    
     qemu-system-x86_64 \
         -name "hpc-controller" \
-        -machine type=pc,accel=kvm:tcg \
-        -cpu host \
+        -machine type=pc,accel=$accel \
+        -cpu $cpu_type \
         -smp 2 \
         -m 2048 \
         -drive file="$CONTROLLER_DISK",format=qcow2,if=virtio \
@@ -142,7 +182,7 @@ start_controller() {
         -netdev bridge,id=net0,br="$BRIDGE_NAME" \
         -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:10 \
         -vnc :1 \
-        -monitor stdio \
+        -monitor unix:${QEMU_WORKSPACE}/controller.monitor,server,nowait \
         -daemonize \
         -pidfile "${QEMU_WORKSPACE}/controller.pid"
     
@@ -158,10 +198,26 @@ start_compute_node() {
     
     log "Starting compute node $node_id..."
     
+    # Detect available acceleration
+    local accel="tcg"
+    local cpu_type="qemu64"
+    
+    if check_kvm_access; then
+        # Test if KVM actually works
+        if timeout 5 qemu-system-x86_64 -accel kvm -machine type=none -nographic -serial none -monitor none -display none </dev/null >/dev/null 2>&1; then
+            accel="kvm:tcg"
+            cpu_type="host"
+        else
+            warn "KVM device exists but not functional, using TCG"
+        fi
+    else
+        warn "KVM not available, using TCG"
+    fi
+    
     qemu-system-x86_64 \
         -name "hpc-compute$node_id" \
-        -machine type=pc,accel=kvm:tcg \
-        -cpu host \
+        -machine type=pc,accel=$accel \
+        -cpu $cpu_type \
         -smp 2 \
         -m 1024 \
         -drive file="$disk_path",format=qcow2,if=virtio \
@@ -170,7 +226,7 @@ start_compute_node() {
         -netdev bridge,id=net0,br="$BRIDGE_NAME" \
         -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:${mac_suffix} \
         -vnc :$vnc_port \
-        -nographic \
+        -display none \
         -daemonize \
         -pidfile "${QEMU_WORKSPACE}/compute${node_id}.pid"
     
@@ -260,7 +316,7 @@ show_status() {
             
             if kill -0 "$pid" 2>/dev/null; then
                 echo -e "${GREEN}✓${NC} $vm_name (PID: $pid)"
-                ((running_vms++))
+                running_vms=$((running_vms + 1))
             else
                 echo -e "${RED}✗${NC} $vm_name (not running)"
                 rm -f "$pidfile"

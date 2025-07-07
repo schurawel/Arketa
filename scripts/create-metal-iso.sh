@@ -235,14 +235,13 @@ EOF
 create_post_install_scripts() {
     log "Creating post-installation scripts..."
     
-    mkdir -p "${ISO_WORKSPACE}/scripts"
-    
-    # Copy existing scripts (this now includes setup-base.sh)
-    cp -r "${PROJECT_DIR}/scripts/"* "${ISO_WORKSPACE}/scripts/"
+    # Copy scripts directly to /opt/hpc-scripts in the ISO workspace
+    mkdir -p "${ISO_WORKSPACE}/opt/hpc-scripts"
+    cp -r "${PROJECT_DIR}/scripts/"* "${ISO_WORKSPACE}/opt/hpc-scripts/"
     cp -r "${PROJECT_DIR}/sample-jobs" "${ISO_WORKSPACE}/"
     
     # Create enhanced node configuration script that leverages existing setup scripts
-    cat > "${ISO_WORKSPACE}/scripts/configure-node.sh" << 'EOF'
+    cat > "${ISO_WORKSPACE}/opt/hpc-scripts/configure-node.sh" << 'EOF'
 #!/bin/bash
 # Configure HPC node after installation
 # This script leverages the existing setup-controller.sh and setup-compute.sh scripts
@@ -292,8 +291,8 @@ if [ "$NODE_TYPE" = "controller" ]; then
     
     # Run controller setup using existing script
     echo "🔧 Running controller-specific setup..."
-    if [ -f "/tmp/scripts/setup-controller.sh" ]; then
-        bash /tmp/scripts/setup-controller.sh
+    if [ -f "/opt/hpc-scripts/setup-controller.sh" ]; then
+        bash /opt/hpc-scripts/setup-controller.sh
     else
         echo "⚠️ Controller setup script not found, manual configuration needed"
     fi
@@ -312,8 +311,8 @@ elif [ "$NODE_TYPE" = "compute" ]; then
     
     # Run compute setup using existing script
     echo "🔧 Running compute node setup..."
-    if [ -f "/tmp/scripts/setup-compute.sh" ]; then
-        bash /tmp/scripts/setup-compute.sh "$NODE_ID"
+    if [ -f "/opt/hpc-scripts/setup-compute.sh" ]; then
+        bash /opt/hpc-scripts/setup-compute.sh "$NODE_ID"
     else
         echo "⚠️ Compute setup script not found, manual configuration needed"
     fi
@@ -334,14 +333,14 @@ else
 fi
 EOF
 
-    chmod +x "${ISO_WORKSPACE}/scripts/configure-node.sh"
+    chmod +x "${ISO_WORKSPACE}/opt/hpc-scripts/configure-node.sh"
     success "Enhanced post-installation scripts created"
 }
 
 create_validation_script() {
     log "Creating HPC stack validation script..."
     
-    cat > "${ISO_WORKSPACE}/scripts/validate-hpc-stack.sh" << 'EOF'
+    cat > "${ISO_WORKSPACE}/opt/hpc-scripts/validate-hpc-stack.sh" << 'EOF'
 #!/bin/bash
 # HPC Stack Validation Script
 # Validates that all components are properly installed and configured
@@ -448,7 +447,7 @@ echo ""
 echo -e "${GREEN}✅ HPC Stack validation complete!${NC}"
 EOF
 
-    chmod +x "${ISO_WORKSPACE}/scripts/validate-hpc-stack.sh"
+    chmod +x "${ISO_WORKSPACE}/opt/hpc-scripts/validate-hpc-stack.sh"
     success "HPC stack validation script created"
 }
 

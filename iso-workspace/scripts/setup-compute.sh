@@ -28,17 +28,6 @@ systemctl start munge
 # Test munge authentication
 munge -n | unmunge
 
-# Install Python and scientific computing tools (if not using base box)
-if [ ! -f /etc/slurm-base-version ] && [ ! -f /etc/hpc-base-version ]; then
-    echo "Installing Python and scientific computing packages..."
-    apt-get install -y python3 python3-pip python3-venv python3-dev
-    pip3 install numpy scipy matplotlib pandas seaborn scikit-learn
-
-    # Install additional tools for simulation work
-    apt-get install -y git htop tree tmux screen
-else
-    echo "Using base box - Python and tools already installed"
-fi
 
 # Build and install Slurm
 # Check if Slurm is already installed
@@ -90,6 +79,18 @@ done
 
 cp /shared/slurm.conf /etc/slurm/
 
+# Create cgroup.conf to explicitly disable cgroup support
+cat > /etc/slurm/cgroup.conf << 'EOF'
+# Explicitly disable cgroup support
+CgroupPlugin=cgroup/none
+EOF
+
+# Ensure proper ownership and permissions for Slurm directories
+chown -R slurm:slurm /opt/slurm/var/run
+chmod 755 /opt/slurm/var/run
+chown -R slurm:slurm /var/log/slurm
+chown -R slurm:slurm /var/spool/slurmd
+
 # Create systemd service file for slurmd
 cat > /etc/systemd/system/slurmd.service << 'EOF'
 [Unit]
@@ -107,29 +108,29 @@ KillMode=process
 LimitNOFILE=131072
 LimitMEMLOCK=infinity
 LimitSTACK=infinity
-User=root
-Group=root
+User=slurm
+Group=slurm
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Configure cgroups for Slurm
-cat > /etc/slurm/cgroup.conf << 'EOF'
-CgroupMountpoint="/sys/fs/cgroup"
-ConstrainCores=yes
-ConstrainRAMSpace=yes
-ConstrainSwapSpace=no
-ConstrainDevices=yes
-EOF
-
-# Remove any problematic TaskAffinity lines that might exist
-sed -i '/TaskAffinity/d' /etc/slurm/cgroup.conf 2>/dev/null || true
-
 # Enable and start slurmd service
 systemctl daemon-reload
 systemctl enable slurmd
-systemctl start slurmd
+
+echo "Starting slurmd service..."
+if ! systemctl start slurmd; then
+    echo "ERROR: Failed to start slurmd service"
+    echo "=== Service status ==="
+    systemctl status slurmd --no-pager -l || true
+    echo "=== Journal logs ==="
+    journalctl -xeu slurmd.service --no-pager --lines=30 || true
+    echo "=== Slurm logs ==="
+    tail -50 /var/log/slurm/slurmd.log 2>/dev/null || echo "No slurmd.log found"
+    echo "=== Testing manual slurmd run ==="
+    timeout 10 /opt/slurm/sbin/slurmd -D -vvv || true
+    exit 1
+fi
 
 echo "Slurm Compute Node ${NODE_ID} setup completed!"
-echo "You can check the status with: systemctl status slurmd"

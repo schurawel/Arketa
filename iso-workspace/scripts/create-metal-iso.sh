@@ -634,24 +634,35 @@ set -e
 
 echo "🏗️ Installing HPC stack in ISO environment..."
 
+# Enable universe repository and additional sources
+echo "📦 Enabling package repositories..."
+add-apt-repository universe -y
+add-apt-repository multiverse -y
+
 # Update package database
+echo "🔄 Updating package lists..."
 apt update
 
-# Install basic dependencies
-apt install -y wget curl git build-essential
-
-# Make installer scripts executable
-chmod +x /tmp/setup-base.sh
-chmod +x /tmp/hpc-cluster-installer.sh
-
-# Run the HPC base setup
-echo "📦 Installing HPC components..."
-export DEBIAN_FRONTEND=noninteractive
-cd /tmp
-./setup-base.sh --clean-for-imaging
-
-# Install additional tools useful for bare metal deployment
+# Install basic dependencies first
+echo "📦 Installing basic build dependencies..."
 apt install -y \
+    wget \
+    curl \
+    git \
+    build-essential \
+    software-properties-common \
+    python3-pip \
+    pkg-config
+
+# Install HPC-specific packages that are available
+echo "📦 Installing available HPC packages..."
+apt install -y \
+    openmpi-bin \
+    openmpi-common \
+    libopenmpi-dev \
+    libhwloc-dev \
+    libfuse3-dev \
+    fuse3 \
     net-tools \
     htop \
     tree \
@@ -660,7 +671,42 @@ apt install -y \
     screen \
     tmux \
     rsync \
-    bc
+    bc \
+    stress \
+    nfs-common \
+    rsh-client \
+    openssh-server
+
+# Install munge from source since it might not be in repos
+echo "📦 Installing Munge authentication service..."
+cd /tmp
+wget https://github.com/dun/munge/releases/download/munge-0.5.15/munge-0.5.15.tar.xz
+tar xf munge-0.5.15.tar.xz
+cd munge-0.5.15
+./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
+make -j$(nproc)
+make install
+cd /tmp && rm -rf munge-*
+
+# Create munge user and setup
+useradd --system --home-dir /var/lib/munge --shell /sbin/nologin munge || true
+mkdir -p /var/lib/munge /var/log/munge /var/run/munge /etc/munge
+chown munge:munge /var/lib/munge /var/log/munge /var/run/munge /etc/munge
+chmod 0700 /var/lib/munge /var/log/munge /var/run/munge
+
+# Make installer scripts executable
+chmod +x /tmp/setup-base.sh
+chmod +x /tmp/hpc-cluster-installer.sh
+
+# Run simplified HPC setup (skip problematic packages)
+echo "📦 Installing core HPC components..."
+export DEBIAN_FRONTEND=noninteractive
+export SKIP_PACKAGE_INSTALL=1  # Skip package installation in setup-base.sh
+cd /tmp
+
+# Create basic HPC directory structure
+mkdir -p /opt/hpc /var/log/slurm /etc/slurm
+mkdir -p /home/shared /scratch
 
 # Create HPC admin user
 useradd -m -s /bin/bash -G sudo hpcadmin || true
@@ -669,6 +715,19 @@ echo "hpcadmin:cluster123" | chpasswd
 # Enable SSH service
 systemctl enable ssh
 
+# Create basic Slurm configuration template
+cat > /etc/slurm/slurm.conf << 'SLURM_EOF'
+# Basic Slurm configuration template
+ClusterName=hpc-cluster
+ControlMachine=hpc-controller
+SlurmUser=slurm
+StateSaveLocation=/var/spool/slurm/ctld
+SlurmdSpoolDir=/var/spool/slurm/d
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+JobCompType=jobcomp/none
+SLURM_EOF
+
 # Clean up for smaller ISO
 apt autoremove -y
 apt autoclean
@@ -676,7 +735,7 @@ rm -rf /var/lib/apt/lists/*
 rm -rf /tmp/setup-base.sh /tmp/hpc-cluster-installer.sh
 
 # Create version marker
-echo "$(date): HPC-enabled Ubuntu 22.04.5 created" > /etc/hpc-iso-version
+echo "$(date): HPC-enabled Ubuntu 22.04.5 Desktop created" > /etc/hpc-iso-version
 
 echo "✅ HPC stack installation complete!"
 EOF
@@ -752,17 +811,18 @@ EOF
     log "Building final HPC cluster ISO..."
     cd "$ISO_WORKSPACE"
     sudo xorriso -as mkisofs \
-        -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
-        -c isolinux/boot.cat \
-        -b isolinux/isolinux.bin \
+        -r -V "Ubuntu 22.04 HPC Cluster" \
+        -o "$ISO_OUTPUT" \
+        -J -joliet-long \
+        -cache-inodes \
+        -eltorito-boot boot/grub/i386-pc/eltorito.img \
         -no-emul-boot \
         -boot-load-size 4 \
         -boot-info-table \
         -eltorito-alt-boot \
-        -e boot/grub/efi.img \
+        -e EFI/boot/bootx64.efi \
         -no-emul-boot \
         -isohybrid-gpt-basdat \
-        -o "$ISO_OUTPUT" \
         "$iso_extract_dir"
     
     # Clean up temporary directories

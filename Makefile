@@ -1,7 +1,7 @@
 # Slurm HPC Cluster Makefile
 # Automated cluster management and testing
 
-.PHONY: help cluster cluster-full test status connect logs health stop start clean force-clean
+.PHONY: help cluster cluster-full test status connect logs health stop start clean clean-vms force-clean
 .PHONY: test-hello test-parallel test-stress test-array show-outputs wait-for-jobs test-and-wait
 .PHONY: test-python test-apptainer test-ml test-distributed test-extended
 .PHONY: show-job-output show-all-outputs show-latest-outputs
@@ -55,6 +55,7 @@ help: ## 📋 Show this help message
 	@echo ""
 	@echo "$(YELLOW)🔄 Development Workflow:$(NC)"
 	@echo "  make cluster-full     # Full build from scratch"
+	@echo "  make clean-vms        # Clean VMs but keep base box (fast cleanup)"
 	@echo ""
 	@echo "$(YELLOW)🏗️ Bare Metal Workflow:$(NC)"
 	@echo "  make metal            # Create custom Ubuntu ISO (independent)"
@@ -419,6 +420,26 @@ force-clean: ## 🧨 Force cleanup all VMs without confirmation (use with cautio
 	@echo "$(BLUE)[INFO]$(NC) Cleaning up build artifacts..."
 	@rm -f slurm-base.box
 	@echo "$(GREEN)[SUCCESS]$(NC) Force cleanup completed."
+
+clean-vms: ## 🧽 Remove cluster VMs but keep base box (preserves build time)
+	@echo "$(YELLOW)[INFO]$(NC) Removing cluster VMs while preserving base box..."
+	@echo "Type 'yes' to continue or anything else to cancel:"
+	@read REPLY && \
+	if [ "$$REPLY" = "yes" ]; then \
+		echo "$(BLUE)[INFO]$(NC) Destroying cluster VMs..."; \
+		$(VAGRANT_WRAPPER) destroy -f controller node1 node2 node3 2>/dev/null || true; \
+		rm -rf .vagrant; \
+		echo "$(BLUE)[INFO]$(NC) Cleaning up cluster VirtualBox VMs..."; \
+		for vm in $$(VBoxManage list vms | grep -E "(controller|node[0-9]+)" | cut -d'"' -f2); do \
+			echo "$(YELLOW)[CLEANUP]$(NC) Removing VM: $$vm"; \
+			VBoxManage controlvm "$$vm" poweroff 2>/dev/null || true; \
+			VBoxManage unregistervm "$$vm" --delete 2>/dev/null || true; \
+		done; \
+		echo "$(GREEN)[SUCCESS]$(NC) Cluster VMs destroyed. Base box preserved."; \
+		echo "$(BLUE)[TIP]$(NC) Use 'make cluster' for fast redeployment with preserved base box"; \
+	else \
+		echo "$(BLUE)[INFO]$(NC) Cancelled."; \
+	fi
 
 ## 🔨 Build Targets
 

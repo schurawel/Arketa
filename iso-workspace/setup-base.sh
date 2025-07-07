@@ -61,14 +61,6 @@ apt-get install -y \
     mariadb-server mariadb-client libmariadb-dev \
     htop tree tmux screen
 
-# Install image processing libraries for Python packages
-log "Installing image processing libraries for Python packages..."
-apt-get install -y \
-    libjpeg-dev libjpeg8-dev libjpeg-turbo8-dev \
-    libpng-dev libtiff5-dev libfreetype6-dev liblcms2-dev \
-    libwebp-dev libharfbuzz-dev libfribidi-dev libxcb1-dev \
-    zlib1g-dev libopenjp2-7-dev
-
 # Install Go
 log "Installing Go ${GO_VERSION}..."
 if [ ! -d "/usr/local/go" ]; then
@@ -162,10 +154,6 @@ timeout 60 apptainer exec docker://alpine:latest echo "Apptainer test successful
 # Create slurm user
 log "Creating slurm system user..."
 useradd -r -s /bin/false slurm 2>/dev/null || log "Slurm user already exists"
-
-# Install Python scientific packages
-log "Installing Python scientific packages..."
-pip3 install --no-cache-dir numpy scipy matplotlib pandas seaborn scikit-learn jupyter notebook || warn "Some Python packages failed to install"
 
 # Function to build and install Slurm (if source is available)
 install_slurm_from_source() {
@@ -267,6 +255,5 @@ log "Base system includes:"
 log "  ✅ System packages and build tools"
 log "  ✅ Go ${GO_VERSION}"
 log "  ✅ Apptainer ${APPTAINER_VERSION}"
-log "  ✅ Python scientific packages"
 log "  ✅ Slurm user account"
 log "  $([ -f "/opt/slurm/bin/sinfo" ] && echo "✅ Slurm from source" || echo "⚠️  Slurm not installed (source not available)")"

@@ -7,9 +7,14 @@ NODE_ID=$1
 
 echo "Setting up Slurm Compute Node ${NODE_ID}..."
 
-# Configure time synchronization
-systemctl enable chrony
-systemctl start chrony
+# Verify base system is available
+if [ ! -f /etc/hpc-base-version ]; then
+    echo "ERROR: HPC base system not found. Run setup-base.sh first."
+    exit 1
+fi
+
+# Source the Slurm environment (should be available from base setup)
+source /etc/profile.d/slurm.sh
 
 # Wait for controller to be ready and shared directory to be available
 echo "Waiting for controller to be ready..."
@@ -28,60 +33,6 @@ systemctl start munge
 # Test munge authentication
 munge -n | unmunge
 
-# Install Python and scientific computing tools (if not using base box)
-if [ ! -f /etc/slurm-base-version ] && [ ! -f /etc/hpc-base-version ]; then
-    echo "Installing Python and scientific computing packages..."
-    apt-get install -y python3 python3-pip python3-venv python3-dev
-    pip3 install numpy scipy matplotlib pandas seaborn scikit-learn
-
-    # Install additional tools for simulation work
-    apt-get install -y git htop tree tmux screen
-else
-    echo "Using base box - Python and tools already installed"
-fi
-
-# Build and install Slurm
-# Check if Slurm is already installed
-if [ -f "/opt/slurm/bin/sinfo" ]; then
-    echo "Slurm already installed, skipping build..."
-else
-    echo "Building Slurm from source..."
-    # Copy source to writable location and build as vagrant user
-    sudo -u vagrant cp -r /home/vagrant/slurm-src /tmp/slurm-build
-    cd /tmp/slurm-build
-
-    echo "Building Slurm without MySQL on compute node..."
-
-    # Configure and build Slurm as vagrant user (without MySQL for compute nodes)
-    sudo -u vagrant ./configure --prefix=/opt/slurm --sysconfdir=/etc/slurm \
-        --enable-pam --with-pam_dir=/lib/x86_64-linux-gnu/security/ \
-        --without-shared-libslurm
-
-    sudo -u vagrant make -j$(nproc)
-
-    make install
-
-    # Create necessary directories
-    mkdir -p /etc/slurm
-    mkdir -p /var/spool/slurmd
-    mkdir -p /var/log/slurm
-    mkdir -p /opt/slurm/var/run
-
-    # Set ownership
-    chown -R slurm:slurm /var/spool/slurmd
-    chown -R slurm:slurm /var/log/slurm
-    chown -R slurm:slurm /opt/slurm/var/run
-
-    # Add Slurm binaries to PATH
-    echo 'export PATH="/opt/slurm/bin:/opt/slurm/sbin:$PATH"' >> /etc/profile.d/slurm.sh
-    echo 'export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"' >> /etc/profile.d/slurm.sh
-    chmod +x /etc/profile.d/slurm.sh
-
-    echo "Slurm build completed!"
-fi
-
-source /etc/profile.d/slurm.sh
-
 # Copy configuration from controller
 while [ ! -f /shared/slurm.conf ]; do
     echo "Waiting for slurm.conf from controller..."
@@ -89,6 +40,20 @@ while [ ! -f /shared/slurm.conf ]; do
 done
 
 cp /shared/slurm.conf /etc/slurm/
+
+# Copy cgroup.conf from controller
+while [ ! -f /shared/cgroup.conf ]; do
+    echo "Waiting for cgroup.conf from controller..."
+    sleep 5
+done
+
+cp /shared/cgroup.conf /etc/slurm/
+
+# Ensure proper ownership and permissions (already set in base, but refresh for safety)
+chown -R slurm:slurm /opt/slurm/var/run
+chmod 755 /opt/slurm/var/run
+chown -R slurm:slurm /var/log/slurm
+chown -R slurm:slurm /var/spool/slurmd
 
 # Create systemd service file for slurmd
 cat > /etc/systemd/system/slurmd.service << 'EOF'
@@ -100,6 +65,8 @@ Requires=munge.service
 [Service]
 Type=forking
 EnvironmentFile=-/etc/default/slurmd
+ExecStartPre=/bin/mkdir -p /opt/slurm/var/run
+ExecStartPre=/bin/chown slurm:slurm /opt/slurm/var/run
 ExecStart=/opt/slurm/sbin/slurmd
 ExecReload=/bin/kill -HUP $MAINPID
 PIDFile=/opt/slurm/var/run/slurmd.pid
@@ -107,29 +74,29 @@ KillMode=process
 LimitNOFILE=131072
 LimitMEMLOCK=infinity
 LimitSTACK=infinity
-User=root
-Group=root
+User=slurm
+Group=slurm
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Configure cgroups for Slurm
-cat > /etc/slurm/cgroup.conf << 'EOF'
-CgroupMountpoint="/sys/fs/cgroup"
-ConstrainCores=yes
-ConstrainRAMSpace=yes
-ConstrainSwapSpace=no
-ConstrainDevices=yes
-EOF
-
-# Remove any problematic TaskAffinity lines that might exist
-sed -i '/TaskAffinity/d' /etc/slurm/cgroup.conf 2>/dev/null || true
-
 # Enable and start slurmd service
 systemctl daemon-reload
 systemctl enable slurmd
-systemctl start slurmd
+
+echo "Starting slurmd service..."
+if ! systemctl start slurmd; then
+    echo "ERROR: Failed to start slurmd service"
+    echo "=== Service status ==="
+    systemctl status slurmd --no-pager -l || true
+    echo "=== Journal logs ==="
+    journalctl -xeu slurmd.service --no-pager --lines=30 || true
+    echo "=== Slurm logs ==="
+    tail -50 /var/log/slurm/slurmd.log 2>/dev/null || echo "No slurmd.log found"
+    echo "=== Testing manual slurmd run ==="
+    timeout 10 /opt/slurm/sbin/slurmd -D -vvv || true
+    exit 1
+fi
 
 echo "Slurm Compute Node ${NODE_ID} setup completed!"
-echo "You can check the status with: systemctl status slurmd"

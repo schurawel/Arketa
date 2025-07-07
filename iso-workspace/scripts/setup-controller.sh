@@ -5,11 +5,16 @@ set -e
 
 echo "Setting up Slurm Controller Node..."
 
-# Configure time synchronization
-systemctl enable chrony
-systemctl start chrony
+# Verify base system is available
+if [ ! -f /etc/hpc-base-version ]; then
+    echo "ERROR: HPC base system not found. Run setup-base.sh first."
+    exit 1
+fi
 
-# Setup Munge authentication
+# Source the Slurm environment (should be available from base setup)
+source /etc/profile.d/slurm.sh
+
+# Setup Munge authentication with new key for controller
 systemctl enable munge
 dd if=/dev/urandom bs=1 count=1024 > /etc/munge/munge.key
 chown munge:munge /etc/munge/munge.key
@@ -20,63 +25,6 @@ systemctl start munge
 cp /etc/munge/munge.key /shared/
 chown slurm:slurm /shared/munge.key
 chmod 400 /shared/munge.key
-
-# Install Python and scientific computing tools (if not using base box)
-if [ ! -f /etc/slurm-base-version ] && [ ! -f /etc/hpc-base-version ]; then
-    echo "Installing Python and scientific computing packages..."
-    apt-get install -y python3 python3-pip python3-venv python3-dev
-    pip3 install numpy scipy matplotlib pandas seaborn jupyter notebook scikit-learn
-
-    # Install additional tools for simulation work
-    apt-get install -y git htop tree tmux screen
-else
-    echo "Using base box - Python and tools already installed"
-fi
-
-# Build and install Slurm
-# Check if Slurm is already installed
-if [ -f "/opt/slurm/bin/sinfo" ]; then
-    echo "Slurm already installed, skipping build..."
-else
-    echo "Building Slurm from source..."
-    # Copy source to writable location and build as vagrant user
-    sudo -u vagrant cp -r /home/vagrant/slurm-src /tmp/slurm-build
-    cd /tmp/slurm-build
-
-    echo "Building Slurm without MySQL..."
-
-    # Configure and build Slurm as vagrant user (without MySQL initially)
-    sudo -u vagrant ./configure --prefix=/opt/slurm --sysconfdir=/etc/slurm \
-        --enable-pam --with-pam_dir=/lib/x86_64-linux-gnu/security/ \
-        --without-shared-libslurm
-
-    sudo -u vagrant make -j$(nproc)
-
-    make install
-
-    # Create necessary directories
-    mkdir -p /etc/slurm
-    mkdir -p /var/spool/slurmctld
-    mkdir -p /var/spool/slurmd
-    mkdir -p /var/log/slurm
-    mkdir -p /opt/slurm/var/run
-
-    # Set ownership
-    chown -R slurm:slurm /var/spool/slurmctld
-    chown -R slurm:slurm /var/spool/slurmd
-    chown -R slurm:slurm /var/log/slurm
-    chown -R slurm:slurm /opt/slurm/var/run
-
-    # Add Slurm binaries to PATH
-    echo 'export PATH="/opt/slurm/bin:/opt/slurm/sbin:$PATH"' >> /etc/profile.d/slurm.sh
-    echo 'export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"' >> /etc/profile.d/slurm.sh
-    chmod +x /etc/profile.d/slurm.sh
-
-    echo "Slurm build completed!"
-fi
-
-# Source the environment
-source /etc/profile.d/slurm.sh
 
 # Create slurm.conf
 cat > /etc/slurm/slurm.conf << 'EOF'
@@ -97,9 +45,9 @@ SchedulerType=sched/backfill
 SelectType=select/cons_tres
 SelectTypeParameters=CR_Core
 
-# Process tracking
-ProctrackType=proctrack/cgroup
-TaskPlugin=task/affinity,task/cgroup
+# Process tracking without cgroups
+ProctrackType=proctrack/pgid
+TaskPlugin=task/affinity
 
 # Logging
 SlurmctldDebug=info
@@ -129,8 +77,8 @@ ReturnToService=1
 # Job completion
 JobCompType=jobcomp/none
 
-# Job accounting  
-JobAcctGatherType=jobacct_gather/linux
+# Job accounting with cgroups support
+JobAcctGatherType=jobacct_gather/none
 JobAcctGatherFrequency=30
 
 # Accounting storage (simplified - no database)
@@ -145,6 +93,15 @@ EOF
 
 # Copy slurm.conf to shared directory
 cp /etc/slurm/slurm.conf /shared/
+
+# Create cgroup.conf to explicitly disable cgroup support
+cat > /etc/slurm/cgroup.conf << 'EOF'
+# Explicitly disable cgroup support
+CgroupPlugin=cgroup/none
+EOF
+
+# Copy cgroup.conf to shared directory too
+cp /etc/slurm/cgroup.conf /shared/
 
 # Create systemd service files  
 cat > /etc/systemd/system/slurmctld.service << 'EOF'

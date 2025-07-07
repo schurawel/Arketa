@@ -53,21 +53,14 @@ apt-get install -y \
     cmake wget curl vim nfs-kernel-server nfs-common chrony \
     software-properties-common libseccomp-dev squashfs-tools cryptsetup \
     fuse libfuse-dev uuid-dev libgpgme11-dev \
-    debootstrap rpm2cpio uidmap runc openssh-server rsync
+    debootstrap rpm2cpio uidmap runc openssh-server rsync \
+    linux-headers-$(uname -r) libdbus-1-dev dbus-user-session
 
 # Install additional packages that might be needed for specific deployments
 log "Installing additional system packages..."
 apt-get install -y \
     mariadb-server mariadb-client libmariadb-dev \
     htop tree tmux screen
-
-# Install image processing libraries for Python packages
-log "Installing image processing libraries for Python packages..."
-apt-get install -y \
-    libjpeg-dev libjpeg8-dev libjpeg-turbo8-dev \
-    libpng-dev libtiff5-dev libfreetype6-dev liblcms2-dev \
-    libwebp-dev libharfbuzz-dev libfribidi-dev libxcb1-dev \
-    zlib1g-dev libopenjp2-7-dev
 
 # Install Go
 log "Installing Go ${GO_VERSION}..."
@@ -163,9 +156,10 @@ timeout 60 apptainer exec docker://alpine:latest echo "Apptainer test successful
 log "Creating slurm system user..."
 useradd -r -s /bin/false slurm 2>/dev/null || log "Slurm user already exists"
 
-# Install Python scientific packages
-log "Installing Python scientific packages..."
-pip3 install --no-cache-dir numpy scipy matplotlib pandas seaborn scikit-learn jupyter notebook || warn "Some Python packages failed to install"
+# Configure time synchronization for cluster
+log "Configuring time synchronization..."
+systemctl enable chrony
+systemctl start chrony
 
 # Function to build and install Slurm (if source is available)
 install_slurm_from_source() {
@@ -198,7 +192,8 @@ install_slurm_from_source() {
     if [ "$build_user" = "vagrant" ]; then
         sudo -u vagrant ./configure --prefix=/opt/slurm --sysconfdir=/etc/slurm \
             --enable-pam --with-pam_dir=/lib/x86_64-linux-gnu/security/ \
-            --without-shared-libslurm 2>&1 | tee configure.log
+            --without-shared-libslurm --with-cgroup --enable-cgroup \
+            --with-ebpf 2>&1 | tee configure.log
         
         # Check if configure succeeded
         if [ ! -f Makefile ]; then
@@ -209,7 +204,8 @@ install_slurm_from_source() {
     else
         ./configure --prefix=/opt/slurm --sysconfdir=/etc/slurm \
             --enable-pam --with-pam_dir=/lib/x86_64-linux-gnu/security/ \
-            --without-shared-libslurm 2>&1 | tee configure.log
+            --without-shared-libslurm --with-cgroup --enable-cgroup \
+            --with-ebpf 2>&1 | tee configure.log
         
         # Check if configure succeeded
         if [ ! -f Makefile ]; then
@@ -224,6 +220,12 @@ install_slurm_from_source() {
     # Create necessary directories
     mkdir -p /etc/slurm /var/spool/slurmctld /var/spool/slurmd /var/log/slurm /opt/slurm/var/run
     chown -R slurm:slurm /var/spool/slurmctld /var/spool/slurmd /var/log/slurm /opt/slurm/var/run
+    
+    # Set proper permissions for runtime directories
+    chmod 755 /opt/slurm/var/run
+    chmod 755 /var/log/slurm
+    chmod 755 /var/spool/slurmctld
+    chmod 755 /var/spool/slurmd
     
     # Add Slurm binaries to PATH
     echo 'export PATH="/opt/slurm/bin:/opt/slurm/sbin:$PATH"' > /etc/profile.d/slurm.sh
@@ -267,6 +269,5 @@ log "Base system includes:"
 log "  ✅ System packages and build tools"
 log "  ✅ Go ${GO_VERSION}"
 log "  ✅ Apptainer ${APPTAINER_VERSION}"
-log "  ✅ Python scientific packages"
 log "  ✅ Slurm user account"
 log "  $([ -f "/opt/slurm/bin/sinfo" ] && echo "✅ Slurm from source" || echo "⚠️  Slurm not installed (source not available)")"

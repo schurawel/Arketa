@@ -811,17 +811,18 @@ EOF
     log "Building final HPC cluster ISO..."
     cd "$ISO_WORKSPACE"
     sudo xorriso -as mkisofs \
-        -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
-        -c isolinux/boot.cat \
-        -b isolinux/isolinux.bin \
+        -r -V "Ubuntu 22.04 HPC Cluster" \
+        -o "$ISO_OUTPUT" \
+        -J -joliet-long \
+        -cache-inodes \
+        -eltorito-boot boot/grub/i386-pc/eltorito.img \
         -no-emul-boot \
         -boot-load-size 4 \
         -boot-info-table \
         -eltorito-alt-boot \
-        -e boot/grub/efi.img \
+        -e EFI/boot/bootx64.efi \
         -no-emul-boot \
         -isohybrid-gpt-basdat \
-        -o "$ISO_OUTPUT" \
         "$iso_extract_dir"
     
     # Clean up temporary directories

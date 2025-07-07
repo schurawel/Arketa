@@ -18,13 +18,16 @@ iso-workspace/temp/
 iso-workspace/iso-extract/
 iso-workspace/iso-rebuild/
 iso-workspace/squashfs-root/
+iso-workspace/opt/
 iso-workspace/*.iso
 iso-workspace/*.log
 iso-workspace/install-hpc-stack.sh
 iso-workspace/grub.cfg
 iso-workspace/.squashfs_filename
 
-# ISO files (except the base Ubuntu ISO if needed for reference)
+*.pid
+*.qcow2
+*.monitor
 *.iso
 
 # Build and log files

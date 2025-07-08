@@ -50,12 +50,15 @@ done
 cp /shared/cgroup.conf /etc/slurm/
 
 # Ensure proper ownership and permissions (already set in base, but refresh for safety)
-chown -R slurm:slurm /opt/slurm/var/run
-chmod 755 /opt/slurm/var/run
+mkdir -p /run/slurm
+chown root:root /run/slurm
+chmod 777 /run/slurm
+rm -f /run/slurm/slurmd.pid
 chown -R slurm:slurm /var/log/slurm
 chown -R slurm:slurm /var/spool/slurmd
 
-# Create systemd service file for slurmd
+
+
 cat > /etc/systemd/system/slurmd.service << 'EOF'
 [Unit]
 Description=Slurm node daemon
@@ -65,17 +68,17 @@ Requires=munge.service
 [Service]
 Type=forking
 EnvironmentFile=-/etc/default/slurmd
-ExecStartPre=/bin/mkdir -p /opt/slurm/var/run
-ExecStartPre=/bin/chown slurm:slurm /opt/slurm/var/run
-ExecStart=/opt/slurm/sbin/slurmd
+ExecStartPre=/bin/mkdir -p /run/slurm
+ExecStart=/opt/slurm/sbin/slurmd -f /etc/slurm/slurm.conf -L /var/log/slurm/slurmd.log -c /etc/slurm/cgroup.conf -M /run/slurm
 ExecReload=/bin/kill -HUP $MAINPID
-PIDFile=/opt/slurm/var/run/slurmd.pid
+PIDFile=/run/slurm/slurmd.pid
 KillMode=process
 LimitNOFILE=131072
 LimitMEMLOCK=infinity
 LimitSTACK=infinity
-User=slurm
-Group=slurm
+User=root
+Group=root
+Delegate=yes
 
 [Install]
 WantedBy=multi-user.target

@@ -48,6 +48,7 @@ SelectTypeParameters=CR_Core
 # Process tracking with cgroups v2
 ProctrackType=proctrack/cgroup
 TaskPlugin=task/affinity,task/cgroup
+SlurmdUser=root
 
 # Logging
 SlurmctldDebug=info
@@ -61,7 +62,7 @@ SlurmdSpoolDir=/var/spool/slurmd
 
 # Process IDs
 SlurmctldPidFile=/opt/slurm/var/run/slurmctld.pid
-SlurmdPidFile=/opt/slurm/var/run/slurmd.pid
+SlurmdPidFile=/run/slurm/slurmd.pid
 
 # Timeouts
 SlurmctldTimeout=120
@@ -105,9 +106,6 @@ ConstrainCores=yes
 ConstrainRAMSpace=yes
 ConstrainSwapSpace=no
 ConstrainDevices=yes
-
-# Task constraints
-TaskAffinity=no
 EOF
 
 # Copy cgroup.conf to shared directory too
@@ -131,8 +129,8 @@ PIDFile=/opt/slurm/var/run/slurmctld.pid
 LimitNOFILE=65536
 LimitMEMLOCK=infinity
 LimitSTACK=infinity
-User=slurm
-Group=slurm
+User=root
+Group=root
 
 [Install]
 WantedBy=multi-user.target

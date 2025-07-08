@@ -27,6 +27,7 @@ Vagrant.configure("2") do |config|
   config.vm.synced_folder "./scripts", "/home/vagrant/scripts", type: "rsync"
   config.vm.synced_folder "./sample-jobs", "/home/vagrant/sample-jobs", type: "rsync"
   config.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", type: "rsync", rsync__exclude: [".git/", "*.o", "*.lo", "*.la"]
+  config.vm.synced_folder "./tmp", "/home/vagrant/tmp", type: "rsync", rsync__exclude: ["*.o", "*.lo", "*.la", "node_modules/", "*.pyc", "__pycache__/"]
   
   # Global VM settings
   config.vm.provider "virtualbox" do |vb|

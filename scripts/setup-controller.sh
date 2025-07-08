@@ -86,11 +86,11 @@ JobAcctGatherFrequency=30
 AccountingStorageType=accounting_storage/slurmdbd
 AccountingStorageHost=localhost
 
-# Node definitions
-NodeName=node[1-3] CPUs=2 Sockets=1 CoresPerSocket=2 ThreadsPerCore=1 RealMemory=900 State=UNKNOWN
+# Node definitions (including controller as a compute node)
+NodeName=controller,node[1-3] CPUs=2 Sockets=1 CoresPerSocket=2 ThreadsPerCore=1 RealMemory=900 State=UNKNOWN
 
-# Partition definitions
-PartitionName=compute Nodes=node[1-3] Default=YES MaxTime=INFINITE State=UP
+# Partition definitions (including controller)
+PartitionName=compute Nodes=controller,node[1-3] Default=YES MaxTime=INFINITE State=UP
 EOF
 
 # Copy slurm.conf to shared directory
@@ -137,10 +137,57 @@ Group=root
 WantedBy=multi-user.target
 EOF
 
+# Create slurmd service file for the controller
+cat > /etc/systemd/system/slurmd.service << 'EOF'
+[Unit]
+Description=Slurm node daemon
+After=network.target munge.service
+Requires=munge.service
+
+[Service]
+Type=forking
+EnvironmentFile=-/etc/default/slurmd
+ExecStartPre=/bin/mkdir -p /run/slurm
+ExecStart=/opt/slurm/sbin/slurmd -f /etc/slurm/slurm.conf -L /var/log/slurm/slurmd.log -c /etc/slurm/cgroup.conf -M /run/slurm
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/run/slurm/slurmd.pid
+KillMode=process
+LimitNOFILE=131072
+LimitMEMLOCK=infinity
+LimitSTACK=infinity
+User=root
+Group=root
+Delegate=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Create required directories for slurmd
+mkdir -p /var/spool/slurmd /var/log/slurm
+chown slurm:slurm /var/spool/slurmd /var/log/slurm
+chmod 755 /var/spool/slurmd /var/log/slurm
+
 # Enable and start services
 systemctl daemon-reload
 systemctl enable slurmctld
 systemctl start slurmctld
+systemctl enable slurmd
+systemctl start slurmd
+
+echo "Starting slurmd service..."
+if ! systemctl start slurmd; then
+    echo "ERROR: Failed to start slurmd service"
+    echo "=== Service status ==="
+    systemctl status slurmd --no-pager -l || true
+    echo "=== Journal logs ==="
+    journalctl -xeu slurmd.service --no-pager --lines=30 || true
+    echo "=== Slurm logs ==="
+    tail -50 /var/log/slurm/slurmd.log 2>/dev/null || echo "No slurmd.log found"
+    echo "=== Testing manual slurmd run ==="
+    timeout 10 /opt/slurm/sbin/slurmd -D -vvv || true
+    exit 1
+fi
 
 echo "Slurm Controller setup completed!"
 echo "You can check the status with: systemctl status slurmctld"

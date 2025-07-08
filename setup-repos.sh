@@ -31,6 +31,8 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP_DIR="${PROJECT_DIR}/tmp"
 VAGRANT_REPO_URL="https://github.com/hashicorp/vagrant.git"
 SLURM_REPO_URL="https://github.com/SchedMD/slurm.git"
+ONDEMAND_REPO_URL="https://github.com/OSC/ondemand.git"
+SLURMWEB_REPO_URL="https://github.com/rackslab/slurm-web.git"
 
 echo "Repository Setup for PrimedSLURM"
 echo "================================"
@@ -65,6 +67,30 @@ else
     print_success "Slurm cloned successfully"
 fi
 
+# Clone Open OnDemand repository
+print_status "Cloning Open OnDemand repository..."
+if [ -d "$TMP_DIR/ondemand" ]; then
+    print_warning "ondemand already exists, updating..."
+    cd "$TMP_DIR/ondemand"
+    git pull
+else
+    print_status "Cloning Open OnDemand from $ONDEMAND_REPO_URL..."
+    git clone "$ONDEMAND_REPO_URL" "$TMP_DIR/ondemand"
+    print_success "Open OnDemand cloned successfully"
+fi
+
+# Clone Slurm Web repository
+print_status "Cloning Slurm Web repository..."
+if [ -d "$TMP_DIR/slurm-web" ]; then
+    print_warning "slurm-web already exists, updating..."
+    cd "$TMP_DIR/slurm-web"
+    git pull
+else
+    print_status "Cloning Slurm Web from $SLURMWEB_REPO_URL..."
+    git clone "$SLURMWEB_REPO_URL" "$TMP_DIR/slurm-web"
+    print_success "Slurm Web cloned successfully"
+fi
+
 # Create or update symbolic links - NOT NEEDED, everything works from tmp/
 # cd "$PROJECT_DIR"
 
@@ -85,6 +111,8 @@ fi
 print_success "Repositories are available in tmp/ directory:"
 print_success "  tmp/vagrant-src (Vagrant source)"
 print_success "  tmp/slurm (Slurm source)"
+print_success "  tmp/ondemand (Open OnDemand source)"
+print_success "  tmp/slurm-web (Slurm Web source)"
 
 # Setup Vagrant dependencies
 print_status "Setting up Vagrant dependencies..."
@@ -117,6 +145,12 @@ if [ -f "tmp/slurm/configure" ]; then
     print_success "Slurm configure script found"
 else
     print_error "Slurm configure script not found in tmp/slurm/configure"
+fi
+
+if [ -f "tmp/slurm-web/pyproject.toml" ]; then
+    print_success "Slurm Web pyproject.toml found"
+else
+    print_error "Slurm Web pyproject.toml not found in tmp/slurm-web/pyproject.toml"
 fi
 
 # Test Vagrant functionality

@@ -87,6 +87,7 @@ EOF
 # Enable and start slurmd service
 systemctl daemon-reload
 systemctl enable slurmd
+systemctl start slurmd
 
 echo "Starting slurmd service..."
 if ! systemctl start slurmd; then

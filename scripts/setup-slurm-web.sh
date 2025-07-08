@@ -6,7 +6,8 @@ echo "--- Setting up slurm-web from source ---"
 
 # Install dependencies
 apt-get update
-apt-get install -y git python3 python3-pip python3-dev build-essential
+apt-get install -y git python3 python3-pip python3-dev build-essential \
+    libsasl2-dev libldap2-dev libssl-dev
 
 # Clone the repository into tmp directory if not already present
 if [ ! -d "/home/vagrant/tmp/slurm-web" ]; then

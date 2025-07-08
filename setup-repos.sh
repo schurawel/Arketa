@@ -31,7 +31,6 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP_DIR="${PROJECT_DIR}/tmp"
 VAGRANT_REPO_URL="https://github.com/hashicorp/vagrant.git"
 SLURM_REPO_URL="https://github.com/SchedMD/slurm.git"
-ONDEMAND_REPO_URL="https://github.com/OSC/ondemand.git"
 SLURMWEB_REPO_URL="https://github.com/rackslab/slurm-web.git"
 
 echo "Repository Setup for PrimedSLURM"
@@ -67,18 +66,6 @@ else
     print_success "Slurm cloned successfully"
 fi
 
-# Clone Open OnDemand repository
-print_status "Cloning Open OnDemand repository..."
-if [ -d "$TMP_DIR/ondemand" ]; then
-    print_warning "ondemand already exists, updating..."
-    cd "$TMP_DIR/ondemand"
-    git pull
-else
-    print_status "Cloning Open OnDemand from $ONDEMAND_REPO_URL..."
-    git clone "$ONDEMAND_REPO_URL" "$TMP_DIR/ondemand"
-    print_success "Open OnDemand cloned successfully"
-fi
-
 # Clone Slurm Web repository
 print_status "Cloning Slurm Web repository..."
 if [ -d "$TMP_DIR/slurm-web" ]; then
@@ -111,8 +98,8 @@ fi
 print_success "Repositories are available in tmp/ directory:"
 print_success "  tmp/vagrant-src (Vagrant source)"
 print_success "  tmp/slurm (Slurm source)"
-print_success "  tmp/ondemand (Open OnDemand source)"
 print_success "  tmp/slurm-web (Slurm Web source)"
+print_status "  Note: Open OnDemand will be deployed using Docker (no source needed)"
 
 # Setup Vagrant dependencies
 print_status "Setting up Vagrant dependencies..."
@@ -177,3 +164,4 @@ echo
 print_warning "Note: The repositories are now stored in the 'tmp/' directory"
 print_warning "      and linked via symbolic links. This keeps them organized"
 print_warning "      and prevents accidental commits to git."
+print_warning "      Open OnDemand will be deployed using Docker containers."

@@ -3,7 +3,7 @@
 
 .PHONY: help cluster cluster-full test status connect logs health stop start clean clean-vms force-clean
 .PHONY: test-hello test-parallel test-stress test-array show-outputs wait-for-jobs test-and-wait
-.PHONY: test-python test-apptainer test-ml test-distributed test-extended
+.PHONY: test-python test-apptainer test-ml test-distributed test-extended test-mpi
 .PHONY: show-job-output show-all-outputs show-latest-outputs
 .PHONY: build-vagrant build-base remove-base list-boxes preflight setup-repos
 .PHONY: metal sim-metal sim-metal-status sim-metal-stop sim-metal-clean sim-metal-connect metal-clean
@@ -154,6 +154,7 @@ test: ## 🧪 Run all sample jobs and show results
 	@echo "  make test-apptainer           # Container-based jobs"
 	@echo "  make test-ml                  # Machine learning workflows"
 	@echo "  make test-distributed         # Multi-node distributed computing"
+	@echo "  make test-mpi                 # MPI parallel jobs"
 
 test-hello: ## 👋 Run hello world job
 	@echo "$(BLUE)[TEST]$(NC) Submitting hello world job..."
@@ -200,13 +201,17 @@ test-apptainer: ## 📦 Run Apptainer container job
 
 test-ml: ## 🤖 Run machine learning simulation
 	@echo "$(BLUE)[TEST]$(NC) Submitting ML simulation..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch sample-jobs/ml_simulation.sh" | grep -o '[0-9]*'); \
+	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/ml_simulation.sh" | grep -o '[0-9]*'); \
 	echo "$(GREEN)[SUBMITTED]$(NC) ML simulation job ID: $$job_id"; \
 	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/ml_simulation_$$job_id.out"
 
+test-mpi: ##  MPI Run MPI hello world job
+	@echo "$(BLUE)[TEST]$(NC) Submitting MPI Hello World job..."
+	@$(CLUSTER_MANAGER) submit ~/sample-jobs/mpi_job.sh
+
 test-distributed: ## 🌐 Run distributed multi-node simulation
 	@echo "$(BLUE)[TEST]$(NC) Submitting distributed simulation..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch sample-jobs/distributed_simulation.sh" | grep -o '[0-9]*'); \
+	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/distributed_simulation.sh" | grep -o '[0-9]*'); \
 	echo "$(GREEN)[SUBMITTED]$(NC) Distributed simulation job ID: $$job_id"; \
 	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/multi_container_$$job_id.out"
 
@@ -217,7 +222,7 @@ test-extended: ## 🔬 Run all extended tests (Python, containers, ML, distribut
 	@echo "$(BLUE)[STEP 2/4]$(NC) Apptainer container..."
 	@$(MAKE) test-apptainer  
 	@echo "$(BLUE)[STEP 3/4]$(NC) Machine learning..."
-	@$(MAKE) test-ml
+	@$(MAKE) test-mpi
 	@echo "$(BLUE)[STEP 4/4]$(NC) Distributed simulation..."
 	@$(MAKE) test-distributed
 	@echo ""

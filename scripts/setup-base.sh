@@ -54,7 +54,8 @@ apt-get install -y \
     software-properties-common libseccomp-dev squashfs-tools cryptsetup \
     fuse libfuse-dev uuid-dev libgpgme11-dev \
     debootstrap rpm2cpio uidmap runc openssh-server rsync \
-    linux-headers-$(uname -r) libdbus-1-dev dbus-user-session
+    linux-headers-$(uname -r) libdbus-1-dev dbus-user-session \
+    openmpi-bin openmpi-common libopenmpi-dev libpmix-dev
 
 # Install additional packages that might be needed for specific deployments
 log "Installing additional system packages..."
@@ -193,7 +194,7 @@ install_slurm_from_source() {
         sudo -u vagrant ./configure --prefix=/opt/slurm --sysconfdir=/etc/slurm \
             --enable-pam --with-pam_dir=/lib/x86_64-linux-gnu/security/ \
             --without-shared-libslurm --with-cgroup --enable-cgroup \
-            --with-ebpf 2>&1 | tee configure.log
+            --with-ebpf --with-pmix 2>&1 | tee configure.log
         
         # Check if configure succeeded
         if [ ! -f Makefile ]; then
@@ -205,7 +206,7 @@ install_slurm_from_source() {
         ./configure --prefix=/opt/slurm --sysconfdir=/etc/slurm \
             --enable-pam --with-pam_dir=/lib/x86_64-linux-gnu/security/ \
             --without-shared-libslurm --with-cgroup --enable-cgroup \
-            --with-ebpf 2>&1 | tee configure.log
+            --with-ebpf --with-pmix 2>&1 | tee configure.log
         
         # Check if configure succeeded
         if [ ! -f Makefile ]; then

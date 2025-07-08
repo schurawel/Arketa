@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=cpu_stress_test
+#SBATCH --job-name=cpu_stress
 #SBATCH --output=cpu_stress_%j.out
 #SBATCH --error=cpu_stress_%j.err
 #SBATCH --time=00:15:00
@@ -8,10 +8,14 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --partition=compute
 
+mkdir -p ~/job_outputs
+cd ~/job_outputs
+
 echo "CPU Stress Test Job"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURM_JOB_NODELIST"
 echo "CPUs allocated: $SLURM_CPUS_PER_TASK"
+echo "Date: $(date)"
 
 # Function to perform CPU-intensive calculation
 cpu_stress() {
@@ -57,7 +61,7 @@ for pid in "${pids[@]}"; do
     wait $pid
 done
 
-echo "CPU stress test completed!"
+echo "CPU stress test completed."
 
 # Show final system status
 echo "=== Final System Status ==="

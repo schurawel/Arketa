@@ -8,6 +8,9 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --partition=compute
 
+mkdir -p ~/job_outputs
+cd ~/job_outputs
+
 echo "Hello World from Slurm!"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node name: $SLURM_JOB_NODELIST"

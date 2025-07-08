@@ -10,8 +10,8 @@
 #SBATCH --array=1-5
 
 # Create output directory if it doesn't exist
-mkdir -p /home/vagrant/job_outputs
-cd /home/vagrant/job_outputs
+mkdir -p ~/job_outputs
+cd ~/job_outputs
 
 echo "Array Job Example"
 echo "Job Array ID: $SLURM_ARRAY_JOB_ID"

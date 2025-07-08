@@ -24,7 +24,6 @@ Vagrant.configure("2") do |config|
   config.vm.box = BASE_BOX
 
   # Shared folder configuration
-  config.vm.synced_folder "./scripts", "/home/vagrant/scripts", type: "rsync"
   config.vm.synced_folder "./sample-jobs", "/home/vagrant/sample-jobs", type: "rsync"
   
   # Only sync slurm source if not using base box

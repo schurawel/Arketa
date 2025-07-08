@@ -1,12 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=apptainer_test
-#SBATCH --output=/home/vagrant/apptainer_test_%j.out
-#SBATCH --error=/home/vagrant/apptainer_test_%j.err
+#SBATCH --output=apptainer_test_%j.out
+#SBATCH --error=apptainer_test_%j.err
 #SBATCH --time=00:15:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=2
 #SBATCH --partition=compute
+
+# Ensure all outputs are explicitly captured in SLURM output files
+mkdir -p ~/job_outputs
+cd ~/job_outputs
 
 echo "Apptainer Container Job"
 echo "Job ID: $SLURM_JOB_ID"
@@ -25,7 +29,7 @@ apptainer --version || echo "Cannot get Apptainer version"
 #   apptainer build sample-jobs/ubuntu_python.sif sample-jobs/ubuntu_python.def
 
 # In the job, just run the pre-built image
-CONTAINER_IMAGE="~/ubuntu_python.sif"
+CONTAINER_IMAGE="~/sample-jobs/ubuntu_python.sif"
 
 if [ -f "$CONTAINER_IMAGE" ]; then
     echo "=== Running Python in Apptainer container ==="
@@ -43,5 +47,4 @@ free -h
 
 echo "Apptainer job completed on $(date)"
 
-# Ensure all outputs are explicitly captured in SLURM output files
-exec > >(tee -a /home/vagrant/apptainer_test_${SLURM_JOB_ID}.out) 2> >(tee -a /home/vagrant/apptainer_test_${SLURM_JOB_ID}.err >&2)
+exec > >(tee -a apptainer_test_${SLURM_JOB_ID}.out) 2> >(tee -a apptainer_test_${SLURM_JOB_ID}.err >&2)

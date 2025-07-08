@@ -8,6 +8,9 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --partition=compute
 
+mkdir -p ~/job_outputs
+cd ~/job_outputs
+
 echo "Python Scientific Simulation Job"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURM_JOB_NODELIST"

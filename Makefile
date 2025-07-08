@@ -157,48 +157,37 @@ test: ## 🧪 Run all sample jobs and show results
 
 test-hello: ## 👋 Run hello world job
 	@echo "$(BLUE)[TEST]$(NC) Submitting hello world job..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch sample-jobs/hello_world.sh" | grep -o '[0-9]*'); \
+	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/hello_world.sh" | grep -o '[0-9]*'); \
 	echo "$(GREEN)[SUBMITTED]$(NC) Hello world job ID: $$job_id"; \
 	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/hello_world_$$job_id.out"
 
 test-parallel: ## ⚡ Run parallel job across multiple nodes
 	@echo "$(BLUE)[TEST]$(NC) Submitting parallel job..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch sample-jobs/parallel_hello.sh" | grep -o '[0-9]*'); \
+	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/parallel_hello.sh" | grep -o '[0-9]*'); \
 	echo "$(GREEN)[SUBMITTED]$(NC) Parallel job ID: $$job_id"; \
 	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/parallel_hello_$$job_id.out"
 
 test-stress: ## 💪 Run CPU stress test
 	@echo "$(BLUE)[TEST]$(NC) Submitting CPU stress test..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch sample-jobs/cpu_stress.sh" | grep -o '[0-9]*'); \
+	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/cpu_stress.sh" | grep -o '[0-9]*'); \
 	echo "$(GREEN)[SUBMITTED]$(NC) CPU stress test job ID: $$job_id"; \
 	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/cpu_stress_$$job_id.out"
 
 test-array: ## 📊 Run job array with multiple tasks
 	@echo "$(BLUE)[TEST]$(NC) Submitting job array..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch sample-jobs/array_job.sh" | grep -o '[0-9]*'); \
+	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/array_job.sh" | grep -o '[0-9]*'); \
 	echo "$(GREEN)[SUBMITTED]$(NC) Job array ID: $$job_id"; \
 	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/array_job_$$job_id*.out"
 
 test-python: ## 🐍 Run Python scientific simulation
 	@echo "$(BLUE)[TEST]$(NC) Submitting Python simulation..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch sample-jobs/python_simulation.sh" | grep -o '[0-9]*'); \
+	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/python_simulation.sh" | grep -o '[0-9]*'); \
 	echo "$(GREEN)[SUBMITTED]$(NC) Python simulation job ID: $$job_id"; \
 	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/python_simulation_$$job_id.out"
 
 test-apptainer: ## 📦 Run Apptainer container job
 	@echo "$(BLUE)[TEST]$(NC) Submitting Apptainer container job..."
-	@echo "$(BLUE)[STEP]$(NC) Copying Apptainer image to cluster nodes..."
-	@if [ ! -f "sample-jobs/ubuntu_python.sif" ]; then \
-		echo "$(YELLOW)[WARNING]$(NC) Apptainer image not found, building it..."; \
-		$(MAKE) build-apptainer-image; \
-	fi
-	@for node in controller node1 node2 node3; do \
-		echo "$(BLUE)[COPY]$(NC) Copying image to $$node..."; \
-		$(VAGRANT_WRAPPER) ssh $$node -c "rm -f ~/ubuntu_python.sif" || true; \
-		cat sample-jobs/ubuntu_python.sif | $(VAGRANT_WRAPPER) ssh $$node -c "cat > ~/ubuntu_python.sif"; \
-	done
-	@echo "$(BLUE)[STEP]$(NC) Submitting job..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch sample-jobs/apptainer_job.sh" | grep -o '[0-9]*'); \
+	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/apptainer_job.sh" | grep -o '[0-9]*'); \
 	echo "$(GREEN)[SUBMITTED]$(NC) Apptainer job ID: $${job_id}"; \
 	echo "$(YELLOW)[MONITOR]$(NC) Waiting for job $${job_id} to complete..."; \
 	while $(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && squeue -j $${job_id} | grep -q $${job_id}"; do \
@@ -275,18 +264,23 @@ show-job-output: ## 📄 Show output for a specific job ID (usage: make show-job
 	for node in controller node1 node2 node3; do \
 		if $(VAGRANT_WRAPPER) status $$node | grep -q "running"; then \
 			echo "$(YELLOW)Checking $$node...$(NC)"; \
-			$(VAGRANT_WRAPPER) ssh $$node -c "ls /home/vagrant/*$(JOB_ID)*.out /home/vagrant/*$(JOB_ID)*.err /home/vagrant/apptainer_test_$(JOB_ID).out /home/vagrant/apptainer_test_$(JOB_ID).err 2>/dev/null | tr -d '\r'" | while read file; do \
-				if [ -n "$$file" ]; then \
-					echo "$(GREEN)Found: $$file$(NC)"; \
+			files=$$($(VAGRANT_WRAPPER) ssh $$node -c "ls -d /home/vagrant/*_$(JOB_ID).out /home/vagrant/*_$(JOB_ID).err /home/vagrant/*_$(JOB_ID)_*.out /home/vagrant/apptainer_test_$(JOB_ID).out /home/vagrant/apptainer_test_$(JOB_ID).err 2>/dev/null"); \
+			if [ -n "$$files" ]; then \
+				for file in $$files; do \
+					file=$$(echo $$file | tr -d '\r'); \
+					echo "$(GREEN)Found: $$file on $$node$(NC)"; \
 					echo "---"; \
-					$(VAGRANT_WRAPPER) ssh $$node -c "cat \"$$file\""; \
+					$(VAGRANT_WRAPPER) ssh $$node -c "cat '$$file'"; \
 					echo "---"; \
 					echo ""; \
 					found=true; \
-				fi; \
-			done || true; \
+				done; \
+			fi; \
 		fi; \
 	done
+	@if [ "$$found" = "false" ]; then \
+		echo "$(YELLOW)No output files found for job $(JOB_ID).$(NC)"; \
+	fi
 
 show-latest-outputs: ## 📄 Show the most recent job outputs with smart detection
 	@echo "$(BOLD)=== Latest Job Outputs ===$(NC)"

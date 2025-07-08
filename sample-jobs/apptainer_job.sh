@@ -29,7 +29,7 @@ apptainer --version || echo "Cannot get Apptainer version"
 #   apptainer build sample-jobs/ubuntu_python.sif sample-jobs/ubuntu_python.def
 
 # In the job, just run the pre-built image
-CONTAINER_IMAGE="~/sample-jobs/ubuntu_python.sif"
+CONTAINER_IMAGE="/home/vagrant/sample-jobs/ubuntu_python.sif"
 
 if [ -f "$CONTAINER_IMAGE" ]; then
     echo "=== Running Python in Apptainer container ==="

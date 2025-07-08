@@ -24,12 +24,9 @@ Vagrant.configure("2") do |config|
   config.vm.box = BASE_BOX
 
   # Shared folder configuration
+  config.vm.synced_folder "./scripts", "/home/vagrant/scripts", type: "rsync"
   config.vm.synced_folder "./sample-jobs", "/home/vagrant/sample-jobs", type: "rsync"
-  
-  # Only sync slurm source if not using base box
-  if BASE_BOX == "ubuntu/jammy64"
-    config.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", type: "rsync", rsync__exclude: [".git/", "*.o", "*.lo", "*.la"]
-  end
+  config.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", type: "rsync", rsync__exclude: [".git/", "*.o", "*.lo", "*.la"]
   
   # Global VM settings
   config.vm.provider "virtualbox" do |vb|
@@ -51,12 +48,16 @@ Vagrant.configure("2") do |config|
     end
 
     # Sync folders for base building
+    base.vm.synced_folder "./scripts", "/home/vagrant/scripts", type: "rsync"
     base.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", type: "rsync", rsync__exclude: [".git/", "*.o", "*.lo", "*.la"]
 
     # Build base system with Slurm compiled using shared setup script
     base.vm.provision "shell", inline: <<-SHELL
       echo "🏗️ Building Slurm base image using shared setup script..."
       
+      # Make scripts executable
+      chmod +x /home/vagrant/scripts/*.sh
+
       # Run the shared HPC base setup script
       /home/vagrant/scripts/setup-base.sh --clean-for-imaging
       
@@ -84,6 +85,9 @@ Vagrant.configure("2") do |config|
       echo "🚀 Setting up Slurm Controller..."
       echo "📦 Using base box: #{BASE_BOX}"
       
+      # Make scripts executable
+      chmod +x /home/vagrant/scripts/*.sh
+
       echo "192.168.60.10 slurm-controller controller" >> /etc/hosts
       echo "192.168.60.11 node1" >> /etc/hosts
       echo "192.168.60.12 node2" >> /etc/hosts
@@ -116,6 +120,9 @@ Vagrant.configure("2") do |config|
       
       # Run controller setup script
       /home/vagrant/scripts/setup-controller.sh
+
+      # Run slurmdbd setup script
+      /home/vagrant/scripts/setup-slurmdbd.sh
     SHELL
   end
 
@@ -135,10 +142,14 @@ Vagrant.configure("2") do |config|
       node.vm.provision "shell", inline: <<-SHELL
         echo "⚙️ Setting up Compute Node #{i}..."
         echo "📦 Using base box: #{BASE_BOX}"
-           echo "192.168.60.10 slurm-controller controller" >> /etc/hosts
-      echo "192.168.60.11 node1" >> /etc/hosts
-      echo "192.168.60.12 node2" >> /etc/hosts
-      echo "192.168.60.13 node3" >> /etc/hosts
+
+        # Make scripts executable
+        chmod +x /home/vagrant/scripts/*.sh
+
+        echo "192.168.60.10 slurm-controller controller" >> /etc/hosts
+        echo "192.168.60.11 node1" >> /etc/hosts
+        echo "192.168.60.12 node2" >> /etc/hosts
+        echo "192.168.60.13 node3" >> /etc/hosts
         
         # Set hostname
         hostnamectl set-hostname node#{i}

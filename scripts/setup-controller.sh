@@ -82,8 +82,9 @@ JobCompType=jobcomp/none
 JobAcctGatherType=jobacct_gather/cgroup
 JobAcctGatherFrequency=30
 
-# Accounting storage (simplified - no database)
-AccountingStorageType=accounting_storage/none
+# Accounting storage (connect to slurmdbd)
+AccountingStorageType=accounting_storage/slurmdbd
+AccountingStorageHost=localhost
 
 # Node definitions
 NodeName=node[1-3] CPUs=2 Sockets=1 CoresPerSocket=2 ThreadsPerCore=1 RealMemory=900 State=UNKNOWN

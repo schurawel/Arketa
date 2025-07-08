@@ -29,6 +29,7 @@ iso-workspace/.squashfs_filename
 *.qcow2
 *.monitor
 *.iso
+*.sif
 
 # Build and log files
 *.log

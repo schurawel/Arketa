@@ -73,6 +73,8 @@ Vagrant.configure("2") do |config|
   config.vm.define "controller" do |controller|
     controller.vm.hostname = "slurm-controller"
     controller.vm.network "private_network", ip: "192.168.60.10"
+    controller.vm.network "forwarded_port", guest: 80, host: 8080, auto_correct: true
+    controller.vm.network "forwarded_port", guest: 8081, host: 8081, auto_correct: true
     
     controller.vm.provider "virtualbox" do |vb|
       vb.memory = "2048"
@@ -121,8 +123,36 @@ Vagrant.configure("2") do |config|
       # Run controller setup script
       /home/vagrant/scripts/setup-controller.sh
 
-      # Run slurmdbd setup script
+      # Run the setup script for the Slurm Database Daemon
       /home/vagrant/scripts/setup-slurmdbd.sh
+      
+      echo "✅ Slurm Database Daemon setup complete."
+    SHELL
+
+    # Install and configure Open OnDemand
+    controller.vm.provision "shell", inline: <<-SHELL
+      echo "🌐 Setting up Open OnDemand..."
+      if [ -f /home/vagrant/scripts/setup-ondemand.sh ]; then
+        chmod +x /home/vagrant/scripts/setup-ondemand.sh
+        /home/vagrant/scripts/setup-ondemand.sh
+        echo "✅ Open OnDemand setup complete."
+        echo "👉 Access the portal at http://localhost:8080"
+      else
+        echo "🤷 Skipping Open OnDemand setup: script not found."
+      fi
+    SHELL
+
+    # Install and configure slurm-web from source
+    controller.vm.provision "shell", inline: <<-SHELL
+      echo "🌐 Setting up slurm-web from source..."
+      if [ -f /home/vagrant/scripts/setup-slurm-web.sh ]; then
+        chmod +x /home/vagrant/scripts/setup-slurm-web.sh
+        /home/vagrant/scripts/setup-slurm-web.sh
+        echo "✅ slurm-web setup complete."
+        echo "👉 Access the portal at http://localhost:8081"
+      else
+        echo "🤷 Skipping slurm-web setup: script not found."
+      fi
     SHELL
   end
 

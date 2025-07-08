@@ -5,6 +5,7 @@
 .PHONY: test-hello test-parallel test-stress test-array show-outputs wait-for-jobs test-and-wait
 .PHONY: test-python test-apptainer test-ml test-distributed test-extended test-mpi
 .PHONY: show-job-output show-all-outputs show-latest-outputs
+.PHONY: ondemand slurm-web
 .PHONY: build-vagrant build-base remove-base list-boxes preflight setup-repos
 .PHONY: metal sim-metal sim-metal-status sim-metal-stop sim-metal-clean sim-metal-connect metal-clean
 
@@ -386,6 +387,16 @@ logs: ## 📋 Display Slurm service logs
 health: ## 🏥 Perform comprehensive health check
 	@echo "$(GREEN)[INFO]$(NC) Performing cluster health check..."
 	@$(CLUSTER_MANAGER) health || echo "$(YELLOW)Some health checks failed - cluster may still be starting$(NC)"
+
+## 🌐 Web Interfaces
+
+ondemand: ## 🌐 Open the Open OnDemand web portal
+	@echo "$(GREEN)[INFO]$(NC) Opening Open OnDemand portal at http://localhost:8080"
+	@xdg-open http://localhost:8080 >/dev/null 2>&1 || echo "Please open http://localhost:8080 in your browser."
+
+slurm-web: ## 🌐 Open the Slurm-Web interface
+	@echo "$(GREEN)[INFO]$(NC) Opening Slurm-Web interface at http://localhost:8081"
+	@xdg-open http://localhost:8081 >/dev/null 2>&1 || echo "Please open http://localhost:8081 in your browser."
 
 ## 🔧 Management Targets
 

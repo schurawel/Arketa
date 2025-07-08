@@ -116,8 +116,8 @@ cp /etc/slurm/cgroup.conf /shared/
 cat > /etc/systemd/system/slurmctld.service << 'EOF'
 [Unit]
 Description=Slurm controller daemon
-After=network.target munge.service slurmdbd.service
-Requires=munge.service slurmdbd.service
+After=network.target munge.service
+Requires=munge.service
 
 [Service]
 Type=forking

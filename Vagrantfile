@@ -4,7 +4,7 @@
 # Slurm Multi-Node Cluster Configuration
 # Supports two modes:
 # 1. Base building mode: SLURM_BUILD_BASE=true vagrant up base
-# 2. Cluster mode: vagrant up controller node1 node2 node3
+# 2. Cluster mode: vagrant up controller node1 node2
 
 # Check if we should use base box or build from scratch
 def get_base_box
@@ -14,7 +14,7 @@ def get_base_box
       return "slurm-base"
     end
   end
-  return "ubuntu/jammy64"  # Ubuntu 22.04 LTS
+  return "generic/ubuntu2204"  # Ubuntu 22.04 LTS with libvirt support
 end
 
 BASE_BOX = get_base_box()
@@ -29,23 +29,31 @@ Vagrant.configure("2") do |config|
   config.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", type: "rsync", rsync__exclude: [".git/", "*.o", "*.lo", "*.la"]
   config.vm.synced_folder "./tmp", "/home/vagrant/tmp", type: "rsync", rsync__exclude: ["*.o", "*.lo", "*.la", "node_modules/", "*.pyc", "__pycache__/"]
   
-  # Global VM settings
-  config.vm.provider "virtualbox" do |vb|
-    vb.gui = false
-    vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
-    vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+  # Create a private network for cluster communication
+  # config.vm.network "private_network", type: "dhcp"
+
+  # Global VM settings for libvirt provider
+  config.vm.provider "libvirt" do |lv|
+    lv.driver = "kvm"
+    lv.memory = 2048
+    lv.cpus = 2
+    lv.nested = true
+    lv.cpu_mode = "host-passthrough"
+    lv.graphics_type = "none"
+    lv.management_network_name = "vagrant-libvirt"
   end
 
   # Base VM for creating Slurm base box (only when SLURM_BUILD_BASE=true)
   config.vm.define "base", autostart: false do |base|
-    base.vm.box = "ubuntu/jammy64"  # Always use Ubuntu 22.04 LTS for base building
+    base.vm.box = "generic/ubuntu2204"  # Ubuntu 22.04 LTS with libvirt support
     base.vm.hostname = "slurm-base"
-    base.vm.network "private_network", ip: "192.168.60.100"
     
-    base.vm.provider "virtualbox" do |vb|
-      vb.memory = "2048"
-      vb.cpus = 2
-      vb.name = "slurm-base-builder"
+    # NOTE: No private network is defined for the base image. It only needs
+    # to be provisioned, not to communicate with other cluster nodes.
+    
+    base.vm.provider "libvirt" do |lv|
+      lv.memory = 3072
+      lv.cpus = 2
     end
 
     # Sync folders for base building
@@ -70,17 +78,18 @@ Vagrant.configure("2") do |config|
     SHELL
   end
 
-  # Slurm Controller Node (slurmctld)
-  config.vm.define "controller" do |controller|
+  # Slurm Controller Node (slurmctld) - Must be provisioned first
+  config.vm.define "controller", primary: true do |controller|
     controller.vm.hostname = "slurm-controller"
-    controller.vm.network "private_network", ip: "192.168.60.10"
-    controller.vm.network "forwarded_port", guest: 80, host: 8080, auto_correct: true
-    controller.vm.network "forwarded_port", guest: 8081, host: 8081, auto_correct: true
+    controller.vm.network "private_network", ip: "192.168.121.10"
     
-    controller.vm.provider "virtualbox" do |vb|
-      vb.memory = "2048"
-      vb.cpus = 2
-      vb.name = "slurm-controller"
+    # Port forwarding for web interfaces
+    controller.vm.network "forwarded_port", guest: 80, host: 8080
+    controller.vm.network "forwarded_port", guest: 8081, host: 8081
+    
+    controller.vm.provider "libvirt" do |lv|
+      lv.memory = 3072
+      lv.cpus = 2
     end
 
     # Install and configure Slurm controller
@@ -91,24 +100,15 @@ Vagrant.configure("2") do |config|
       # Make scripts executable
       chmod +x /home/vagrant/scripts/*.sh
 
-      echo "192.168.60.10 slurm-controller controller" >> /etc/hosts
-      echo "192.168.60.11 node1" >> /etc/hosts
-      echo "192.168.60.12 node2" >> /etc/hosts
-      echo "192.168.60.13 node3" >> /etc/hosts
+      echo "192.168.121.10 slurm-controller controller" >> /etc/hosts
+      echo "192.168.121.11 node1" >> /etc/hosts
+      echo "192.168.121.12 node2" >> /etc/hosts
       
       # Set hostname
       hostnamectl set-hostname slurm-controller
       
-      # Only install dependencies if not using base box
-      if [ "#{BASE_BOX}" = "ubuntu/jammy64" ]; then
-        echo "📦 Installing dependencies using shared setup script..."
-        /home/vagrant/scripts/setup-base.sh
-        useradd -r -s /bin/false slurm || true
-      else
-        echo "⚡ Using pre-built base box - skipping dependency installation"
-        apt-get update
-        apt-get install -y nfs-kernel-server
-      fi
+      apt-get update
+      apt-get install -y nfs-kernel-server
       
       # Setup shared directory
       mkdir -p /shared
@@ -116,7 +116,7 @@ Vagrant.configure("2") do |config|
       chmod 755 /shared
       
       # Configure NFS export for shared directory
-      echo "/shared 192.168.60.0/24(rw,sync,no_subtree_check,no_root_squash)" >> /etc/exports
+      echo "/shared 192.168.121.0/24(rw,sync,no_subtree_check,no_root_squash)" >> /etc/exports
       systemctl enable nfs-kernel-server
       systemctl start nfs-kernel-server
       exportfs -a
@@ -155,18 +155,23 @@ Vagrant.configure("2") do |config|
         echo "🤷 Skipping slurm-web setup: script not found."
       fi
     SHELL
+
+    # Mark controller as fully provisioned
+    controller.vm.provision "shell", inline: <<-SHELL
+      echo "🎯 Controller provisioning complete"
+      echo "✅ Controller node fully configured and ready for compute nodes"
+    SHELL
   end
 
-  # Slurm Compute Nodes
-  (1..3).each do |i|
+  # Slurm Compute Nodes (slurmd)
+  (1..2).each do |i|
     config.vm.define "node#{i}" do |node|
       node.vm.hostname = "node#{i}"
-      node.vm.network "private_network", ip: "192.168.60.#{10+i}"
+      node.vm.network "private_network", ip: "192.168.121.#{10 + i}"
       
-      node.vm.provider "virtualbox" do |vb|
-        vb.memory = "1024"
-        vb.cpus = 2
-        vb.name = "slurm-node#{i}"
+      node.vm.provider "libvirt" do |lv|
+        lv.memory = 2048
+        lv.cpus = 2
       end
 
       # Install and configure Slurm compute node
@@ -177,32 +182,27 @@ Vagrant.configure("2") do |config|
         # Make scripts executable
         chmod +x /home/vagrant/scripts/*.sh
 
-        echo "192.168.60.10 slurm-controller controller" >> /etc/hosts
-        echo "192.168.60.11 node1" >> /etc/hosts
-        echo "192.168.60.12 node2" >> /etc/hosts
-        echo "192.168.60.13 node3" >> /etc/hosts
+        echo "192.168.121.10 slurm-controller controller" >> /etc/hosts
+        echo "192.168.121.11 node1" >> /etc/hosts
+        echo "192.168.121.12 node2" >> /etc/hosts
         
         # Set hostname
         hostnamectl set-hostname node#{i}
         
-        # Only install dependencies if not using base box
-        if [ "#{BASE_BOX}" = "ubuntu/jammy64" ]; then
-          echo "📦 Installing dependencies using shared setup script..."
-          /home/vagrant/scripts/setup-base.sh
-          useradd -r -s /bin/false slurm || true
-        else
-          echo "⚡ Using pre-built base box - skipping dependency installation"
-          apt-get update
-          apt-get install -y nfs-common
-        fi
+        apt-get update
+        apt-get install -y nfs-common
+
         
         # Mount shared directory
         mkdir -p /shared
         echo "slurm-controller:/shared /shared nfs defaults 0 0" >> /etc/fstab
         
         # Run compute node setup script
-        /home/vagrant/scripts/setup-compute.sh #{i}
+        /home/vagrant/scripts/setup-compute.sh
+        
+        echo "✅ Compute Node #{i} fully configured and ready"
       SHELL
     end
   end
 end
+

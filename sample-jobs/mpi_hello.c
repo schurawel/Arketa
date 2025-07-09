@@ -1,18 +1,29 @@
 #include <mpi.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 int main(int argc, char** argv) {
-    // Initialize the MPI environment
-    MPI_Init(NULL, NULL);
+    int provided;
+    
+    // Initialize the MPI environment with thread support query
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_SINGLE, &provided);
+    
+    // Add some debug output
+    printf("MPI Init completed\n");
+    fflush(stdout);
 
     // Get the number of processes
     int world_size;
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    printf("World size: %d\n", world_size);
+    fflush(stdout);
 
     // Get the rank of the process
     int world_rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    printf("Rank %d: Got rank\n", world_rank);
+    fflush(stdout);
 
     // Get the name of the processor
     char processor_name[MPI_MAX_PROCESSOR_NAME];
@@ -22,10 +33,26 @@ int main(int argc, char** argv) {
     // Print off a hello world message
     printf("Hello world from processor %s, rank %d out of %d processors\n",
            processor_name, world_rank, world_size);
+    fflush(stdout);
+    
+    // Add a barrier to synchronize all processes
+    printf("Rank %d: Before barrier\n", world_rank);
+    fflush(stdout);
+    MPI_Barrier(MPI_COMM_WORLD);
+    printf("Rank %d: After barrier\n", world_rank);
+    fflush(stdout);
     
     // Sleep for a bit to make sure the output is captured
     sleep(1);
 
+    printf("Rank %d: Before finalize\n", world_rank);
+    fflush(stdout);
+    
     // Finalize the MPI environment.
     MPI_Finalize();
+    
+    printf("Rank %d: After finalize\n", world_rank);
+    fflush(stdout);
+    
+    return 0;
 }

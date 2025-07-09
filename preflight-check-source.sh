@@ -79,14 +79,28 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
-# Check VirtualBox
-print_status "Checking VirtualBox installation..."
-if command -v vboxmanage >/dev/null 2>&1; then
-    vbox_version=$(vboxmanage --version)
-    print_success "VirtualBox found: $vbox_version"
+# Check libvirt installation
+print_status "Checking libvirt installation..."
+if command -v virsh >/dev/null 2>&1; then
+    libvirt_version=$(virsh --version)
+    print_success "libvirt found: $libvirt_version"
 else
-    print_error "VirtualBox not found"
+    print_error "libvirt not found. Please install it using setup-libvirt."
     ERRORS=$((ERRORS + 1))
+fi
+
+# Check vagrant-libvirt plugin
+print_status "Checking vagrant-libvirt plugin..."
+if ./vagrant-wrapper.sh plugin list | grep -q vagrant-libvirt; then
+    print_success "vagrant-libvirt plugin is installed"
+else
+    print_warning "vagrant-libvirt plugin is not installed. Attempting to install..."
+    if ./vagrant-wrapper.sh plugin install vagrant-libvirt; then
+        print_success "vagrant-libvirt plugin installed successfully."
+    else
+        print_error "Failed to install vagrant-libvirt plugin. Please install it manually."
+        ERRORS=$((ERRORS + 1))
+    fi
 fi
 
 # Check disk space

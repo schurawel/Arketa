@@ -4,9 +4,26 @@ set -e
 
 echo "--- Setting up Open OnDemand with Docker ---"
 
+# Wait for any running package manager processes to complete
+echo "--- Waiting for package manager to be available ---"
+while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    echo "Waiting for other package managers to finish..."
+    sleep 5
+done
+
+# Kill any stuck unattended-upgrade processes
+if pgrep -f unattended-upgrade > /dev/null; then
+    echo "Stopping unattended-upgrades..."
+    systemctl stop unattended-upgrades || true
+    pkill -f unattended-upgrade || true
+    sleep 3
+fi
+
 # Install Docker if not already installed
 if ! command -v docker &> /dev/null; then
     echo "--- Installing Docker ---"
+    # Wait a bit more and try to acquire the lock
+    sleep 2
     apt-get update
     apt-get install -y ca-certificates curl gnupg lsb-release
     
@@ -38,8 +55,51 @@ else
 fi
 
 # Create directory for Open OnDemand configuration
-mkdir -p /opt/ood/config
+mkdir -p /opt/ood/config/clusters.d
 mkdir -p /opt/ood/data
+
+# Build Open OnDemand Docker image from source
+echo "--- Building Open OnDemand Docker image ---"
+if [ -d "/tmp/ondemand" ]; then
+    cd /tmp/ondemand
+    echo "Building Open OnDemand image (this may take several minutes)..."
+    if docker build -t ondemand:latest -f Dockerfile . ; then
+        echo "Open OnDemand image built successfully"
+    else
+        echo "Failed to build Open OnDemand image. Trying fallback approach..."
+        # Use a simple Apache-based approach as fallback
+        cat > /tmp/Dockerfile.simple << 'SIMPLE_EOF'
+FROM ubuntu:22.04
+
+# Install Apache and basic dependencies
+RUN apt-get update && apt-get install -y \
+    apache2 \
+    apache2-utils \
+    ruby \
+    ruby-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Simple index page
+RUN echo '<h1>Open OnDemand Placeholder</h1><p>This is a placeholder for Open OnDemand.</p><p>Slurm cluster is running separately.</p>' > /var/www/html/index.html
+
+EXPOSE 80
+CMD ["apache2ctl", "-D", "FOREGROUND"]
+SIMPLE_EOF
+        docker build -t ondemand:latest -f /tmp/Dockerfile.simple /tmp/
+    fi
+else
+    echo "Open OnDemand source not found, creating a simple placeholder service..."
+    # Create a minimal placeholder
+    cat > /tmp/Dockerfile.placeholder << 'PLACEHOLDER_EOF'
+FROM nginx:alpine
+
+RUN echo '<h1>Open OnDemand Placeholder</h1><p>This is a placeholder for Open OnDemand.</p><p>Slurm cluster is running at the controller node.</p><p>You can access Slurm directly via SSH to the controller.</p>' > /usr/share/nginx/html/index.html
+
+EXPOSE 80
+PLACEHOLDER_EOF
+    docker build -t ondemand:latest -f /tmp/Dockerfile.placeholder /tmp/
+fi
 
 # Create docker-compose.yml for Open OnDemand
 echo "--- Creating Docker Compose configuration ---"
@@ -48,19 +108,13 @@ version: '3.8'
 
 services:
   ondemand:
-    image: ohiosupercomputer/ondemand:latest
+    image: ondemand:latest
     container_name: ondemand
     ports:
-      - "80:8080"
-      - "443:8443"
+      - "8080:80"
     volumes:
-      - /opt/ood/config:/etc/ood/config
+      - /opt/ood/config:/etc/ood/config:ro
       - /opt/ood/data:/var/lib/ondemand-nginx/config/puns
-      - /etc/passwd:/etc/passwd:ro
-      - /etc/group:/etc/group:ro
-      - /home:/home:ro
-    environment:
-      - OOD_PORTAL_GENERATOR=true
     restart: unless-stopped
     networks:
       - ondemand

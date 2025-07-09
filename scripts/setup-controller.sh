@@ -12,7 +12,25 @@ if [ ! -f /etc/hpc-base-version ]; then
 fi
 
 # Source the Slurm environment (should be available from base setup)
-source /etc/profile.d/slurm.sh
+if ! grep -q "/opt/slurm/bin" /etc/environment; then
+    sed -i 's|PATH="\(.*\)"|PATH="/opt/slurm/bin:/opt/slurm/sbin:\1"|' /etc/environment
+fi
+
+# Add to /etc/bash.bashrc for non-login shells (SSH sessions)
+if ! grep -q "opt/slurm" /etc/bash.bashrc; then
+    echo '' >> /etc/bash.bashrc
+    echo '# Slurm environment' >> /etc/bash.bashrc
+    echo 'export PATH="/opt/slurm/bin:/opt/slurm/sbin:$PATH"' >> /etc/bash.bashrc
+    echo 'export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"' >> /etc/bash.bashrc
+fi
+
+if [ -f /etc/profile.d/slurm.sh ]; then
+    source /etc/profile.d/slurm.sh
+else
+    # Fallback environment setup
+    export PATH="/opt/slurm/bin:/opt/slurm/sbin:$PATH"
+    export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"
+fi
 
 # Setup Munge authentication with new key for controller
 systemctl enable munge
@@ -86,11 +104,11 @@ JobAcctGatherFrequency=30
 AccountingStorageType=accounting_storage/slurmdbd
 AccountingStorageHost=localhost
 
-# Node definitions (including controller as a compute node)
-NodeName=controller,node[1-3] CPUs=2 Sockets=1 CoresPerSocket=2 ThreadsPerCore=1 RealMemory=900 State=UNKNOWN
+# Node definitions (controller + 2 compute nodes)
+NodeName=controller,node[1-2] CPUs=2 Sockets=1 CoresPerSocket=2 ThreadsPerCore=1 RealMemory=1800 State=UNKNOWN
 
-# Partition definitions (including controller)
-PartitionName=compute Nodes=controller,node[1-3] Default=YES MaxTime=INFINITE State=UP
+# Partition definitions (controller + 2 compute nodes)
+PartitionName=compute Nodes=controller,node[1-2] Default=YES MaxTime=INFINITE State=UP
 EOF
 
 # Copy slurm.conf to shared directory
@@ -148,6 +166,8 @@ Requires=munge.service
 Type=forking
 EnvironmentFile=-/etc/default/slurmd
 ExecStartPre=/bin/mkdir -p /run/slurm
+ExecStartPre=/bin/chown slurm:slurm /run/slurm
+ExecStartPre=/bin/chmod 755 /run/slurm
 ExecStart=/opt/slurm/sbin/slurmd -f /etc/slurm/slurm.conf -L /var/log/slurm/slurmd.log -c /etc/slurm/cgroup.conf -M /run/slurm
 ExecReload=/bin/kill -HUP $MAINPID
 PIDFile=/run/slurm/slurmd.pid
@@ -164,9 +184,9 @@ WantedBy=multi-user.target
 EOF
 
 # Create required directories for slurmd
-mkdir -p /var/spool/slurmd /var/log/slurm
-chown slurm:slurm /var/spool/slurmd /var/log/slurm
-chmod 755 /var/spool/slurmd /var/log/slurm
+mkdir -p /var/spool/slurmd /var/log/slurm /run/slurm
+chown slurm:slurm /var/spool/slurmd /var/log/slurm /run/slurm
+chmod 755 /var/spool/slurmd /var/log/slurm /run/slurm
 
 # Enable and start services
 systemctl daemon-reload

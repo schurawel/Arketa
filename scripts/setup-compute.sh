@@ -14,7 +14,26 @@ if [ ! -f /etc/hpc-base-version ]; then
 fi
 
 # Source the Slurm environment (should be available from base setup)
-source /etc/profile.d/slurm.sh
+# Also ensure environment is available for all shell types
+if ! grep -q "/opt/slurm/bin" /etc/environment; then
+    sed -i 's|PATH="\(.*\)"|PATH="/opt/slurm/bin:/opt/slurm/sbin:\1"|' /etc/environment
+fi
+
+# Add to /etc/bash.bashrc for non-login shells (SSH sessions)
+if ! grep -q "opt/slurm" /etc/bash.bashrc; then
+    echo '' >> /etc/bash.bashrc
+    echo '# Slurm environment' >> /etc/bash.bashrc
+    echo 'export PATH="/opt/slurm/bin:/opt/slurm/sbin:$PATH"' >> /etc/bash.bashrc
+    echo 'export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"' >> /etc/bash.bashrc
+fi
+
+if [ -f /etc/profile.d/slurm.sh ]; then
+    source /etc/profile.d/slurm.sh
+else
+    # Fallback environment setup
+    export PATH="/opt/slurm/bin:/opt/slurm/sbin:$PATH"
+    export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"
+fi
 
 # Wait for controller to be ready and shared directory to be available
 echo "Waiting for controller to be ready..."
@@ -50,12 +69,10 @@ done
 cp /shared/cgroup.conf /etc/slurm/
 
 # Ensure proper ownership and permissions (already set in base, but refresh for safety)
-mkdir -p /run/slurm
-chown root:root /run/slurm
-chmod 777 /run/slurm
+mkdir -p /run/slurm /var/log/slurm /var/spool/slurmd
+chown slurm:slurm /run/slurm /var/log/slurm /var/spool/slurmd
+chmod 755 /run/slurm /var/log/slurm /var/spool/slurmd
 rm -f /run/slurm/slurmd.pid
-chown -R slurm:slurm /var/log/slurm
-chown -R slurm:slurm /var/spool/slurmd
 
 
 
@@ -69,6 +86,8 @@ Requires=munge.service
 Type=forking
 EnvironmentFile=-/etc/default/slurmd
 ExecStartPre=/bin/mkdir -p /run/slurm
+ExecStartPre=/bin/chown slurm:slurm /run/slurm
+ExecStartPre=/bin/chmod 755 /run/slurm
 ExecStart=/opt/slurm/sbin/slurmd -f /etc/slurm/slurm.conf -L /var/log/slurm/slurmd.log -c /etc/slurm/cgroup.conf -M /run/slurm
 ExecReload=/bin/kill -HUP $MAINPID
 PIDFile=/run/slurm/slurmd.pid

@@ -1,7 +1,7 @@
 # Slurm HPC Cluster Makefile
 # Automated cluster management and testing
 
-.PHONY: help cluster cluster-full test status connect logs health stop start clean clean-vms force-clean
+.PHONY: help cluster cluster-full test status connect logs health stop start clean clean-vms force-clean setup-libvirt
 .PHONY: test-hello test-parallel test-stress test-array show-outputs wait-for-jobs test-and-wait
 .PHONY: test-python test-apptainer test-ml test-distributed test-extended test-mpi
 .PHONY: show-job-output show-all-outputs show-latest-outputs
@@ -65,23 +65,15 @@ help: ## 📋 Show this help message
 	@echo "  make metal-clean      # Clean up ISO workspace"
 	@echo "  make clean            # Clean up completely"
 
-cluster: setup-repos preflight build-vagrant ## 🚀 Complete cluster setup using base box (recommended)
+cluster: setup-repos preflight build-base ## 🚀 Complete cluster setup using base box (recommended)
 	@echo "$(GREEN)[INFO]$(NC) Starting cluster deployment..."
-	@echo "$(BLUE)[STEP]$(NC) Ensuring repositories are available..."
-	@if [ ! -d "tmp/vagrant-src" ] || [ ! -d "tmp/slurm" ]; then \
-		echo "$(YELLOW)[WARNING]$(NC) Required repositories not found. Setting them up..."; \
-		$(MAKE) setup-repos; \
-	else \
-		echo "$(GREEN)[OK]$(NC) Repositories are available"; \
-	fi
-	@if $(VAGRANT_WRAPPER) box list | grep -q "slurm-base"; then \
-		echo "$(BLUE)[INFO]$(NC) Using pre-built Slurm base box"; \
-		SLURM_USE_BASE=true $(VAGRANT_WRAPPER) up controller node1 node2 node3; \
-	else \
-		echo "$(YELLOW)[WARNING]$(NC) Base box not found. Creating it first..."; \
-		$(MAKE) build-base; \
-		SLURM_USE_BASE=true $(VAGRANT_WRAPPER) up controller node1 node2 node3; \
-	fi
+	@echo "$(BLUE)[INFO]$(NC) Base box check complete. Proceeding with cluster setup..."
+	@echo "$(BLUE)[STEP 1/3]$(NC) Starting controller node..."
+	SLURM_USE_BASE=true $(VAGRANT_WRAPPER) up controller
+	@echo "$(BLUE)[STEP 2/3]$(NC) Starting compute node 1..."
+	SLURM_USE_BASE=true $(VAGRANT_WRAPPER) up node1
+	@echo "$(BLUE)[STEP 3/3]$(NC) Starting compute node 2..."
+	SLURM_USE_BASE=true $(VAGRANT_WRAPPER) up node2
 	@echo "$(BLUE)[STEP]$(NC) Waiting for services to initialize..."
 	@sleep 60
 	@echo "$(BLUE)[STEP]$(NC) Performing health check..."
@@ -89,624 +81,254 @@ cluster: setup-repos preflight build-vagrant ## 🚀 Complete cluster setup usin
 	@echo "$(GREEN)[SUCCESS]$(NC) Cluster is ready!"
 	@echo ""
 	@echo "$(BOLD)Next steps:$(NC)"
-	@echo "  make test       # Run sample jobs"
-	@echo "  make connect    # Connect to cluster"
-	@echo "  make status     # Check status"
+	@echo "  - Connect to the controller: $(BOLD)make connect$(NC)"
+	@echo "  - Run sample jobs: $(BOLD)make test$(NC)"
+	@echo "  - Check cluster status: $(BOLD)make status$(NC)"
+	@echo "  - Access Open OnDemand: http://localhost:8080"
 
-cluster-full: setup-repos preflight build-vagrant ## 🔨 Complete cluster setup from scratch (slower)
-	@echo "$(GREEN)[INFO]$(NC) Starting complete cluster setup from scratch..."
-	@echo "$(YELLOW)[WARNING]$(NC) This will build Slurm 4 times (~40-60 minutes)"
-	@echo "$(BLUE)[STEP]$(NC) Ensuring repositories are available..."
-	@if [ ! -d "tmp/vagrant-src" ] || [ ! -d "tmp/slurm" ]; then \
-		echo "$(YELLOW)[WARNING]$(NC) Required repositories not found. Setting them up..."; \
-		$(MAKE) setup-repos; \
-	else \
-		echo "$(GREEN)[OK]$(NC) Repositories are available"; \
-	fi
-	@echo "$(BLUE)[STEP 1/4]$(NC) Starting controller node..."
-	@$(VAGRANT_WRAPPER) up controller
-	@echo "$(BLUE)[STEP 2/4]$(NC) Starting compute nodes..."
-	@$(VAGRANT_WRAPPER) up node1 node2 node3
-	@echo "$(BLUE)[STEP 3/4]$(NC) Waiting for services to initialize..."
+cluster-full: setup-repos preflight build-vagrant ## 📦 Complete cluster setup from scratch (slower)
+	@echo "$(YELLOW)[WARNING]$(NC) Starting full cluster deployment from scratch. This will take a while."
+	@echo "$(BLUE)[STEP 1/3]$(NC) Starting controller node..."
+	SLURM_USE_BASE=false $(VAGRANT_WRAPPER) up controller
+	@echo "$(BLUE)[STEP 2/3]$(NC) Starting compute node 1..."
+	SLURM_USE_BASE=false $(VAGRANT_WRAPPER) up node1
+	@echo "$(BLUE)[STEP 3/3]$(NC) Starting compute node 2..."
+	SLURM_USE_BASE=false $(VAGRANT_WRAPPER) up node2
+	@echo "$(BLUE)[STEP]$(NC) Waiting for services to initialize..."
 	@sleep 60
-	@echo "$(BLUE)[STEP 4/4]$(NC) Performing health check..."
+	@echo "$(BLUE)[STEP]$(NC) Performing health check..."
 	@$(MAKE) health
 	@echo "$(GREEN)[SUCCESS]$(NC) Cluster is ready!"
-	@echo ""
-	@echo "$(BOLD)Next steps:$(NC)"
-	@echo "  make test       # Run sample jobs"
-	@echo "  make connect    # Connect to cluster"
-	@echo "  make status     # Check status"
 
-## 🧪 Testing Targets
+## 🏗️ Base Box Management
 
-test: ## 🧪 Run all sample jobs and show results
-	@echo "$(GREEN)[INFO]$(NC) Running all sample jobs with output monitoring..."
-	@echo "$(BLUE)[STEP 1/4]$(NC) Running hello world job..."
-	@$(MAKE) test-hello
-	@echo "$(BLUE)[STEP 2/4]$(NC) Running parallel job..."
-	@$(MAKE) test-parallel  
-	@echo "$(BLUE)[STEP 3/4]$(NC) Running stress test..."
-	@$(MAKE) test-stress
-	@echo "$(BLUE)[STEP 4/4]$(NC) Running array job..."
-	@$(MAKE) test-array
-	@echo ""
-	@echo "$(GREEN)[INFO]$(NC) All basic jobs submitted! Waiting for completion..."
-	@sleep 10
-	@echo "$(BLUE)[MONITORING]$(NC) Job status:"
-	@$(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && squeue" || echo "$(YELLOW)No active jobs$(NC)"
-	@echo ""
-	@echo "$(BLUE)[RESULTS]$(NC) Recent job history:"
-	@$(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sacct --format=JobID,JobName%15,State,ExitCode,Start,End,NodeList -n | tail -20" || echo "$(YELLOW)No job history$(NC)"
-	@echo ""
-	@echo "$(GREEN)[SUCCESS]$(NC) Basic test completed!"
-	@echo ""
-	@echo "$(BOLD)View job outputs:$(NC)"
-	@echo "  make show-outputs             # Show latest outputs from recent test"
-	@echo "  make show-latest-outputs      # Show most recent outputs with smart detection"
-	@echo "  make show-all-outputs         # Show all job outputs from all nodes"
-	@echo "  make show-job-output JOB_ID=17  # Show specific job output"
-	@echo "  make status                   # Check current cluster status"
-	@echo "  make connect                  # SSH to controller for manual inspection"
-	@echo ""
-	@echo "$(BOLD)Advanced Tests:$(NC)"
-	@echo "  make test-extended            # Run Python, ML, containers, distributed"
-	@echo "  make test-python              # Scientific Python simulation"
-	@echo "  make test-apptainer           # Container-based jobs"
-	@echo "  make test-ml                  # Machine learning workflows"
-	@echo "  make test-distributed         # Multi-node distributed computing"
-	@echo "  make test-mpi                 # MPI parallel jobs"
-
-test-hello: ## 👋 Run hello world job
-	@echo "$(BLUE)[TEST]$(NC) Submitting hello world job..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/hello_world.sh" | grep -o '[0-9]*'); \
-	echo "$(GREEN)[SUBMITTED]$(NC) Hello world job ID: $$job_id"; \
-	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/hello_world_$$job_id.out"
-
-test-parallel: ## ⚡ Run parallel job across multiple nodes
-	@echo "$(BLUE)[TEST]$(NC) Submitting parallel job..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/parallel_hello.sh" | grep -o '[0-9]*'); \
-	echo "$(GREEN)[SUBMITTED]$(NC) Parallel job ID: $$job_id"; \
-	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/parallel_hello_$$job_id.out"
-
-test-stress: ## 💪 Run CPU stress test
-	@echo "$(BLUE)[TEST]$(NC) Submitting CPU stress test..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/cpu_stress.sh" | grep -o '[0-9]*'); \
-	echo "$(GREEN)[SUBMITTED]$(NC) CPU stress test job ID: $$job_id"; \
-	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/cpu_stress_$$job_id.out"
-
-test-array: ## 📊 Run job array with multiple tasks
-	@echo "$(BLUE)[TEST]$(NC) Submitting job array..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/array_job.sh" | grep -o '[0-9]*'); \
-	echo "$(GREEN)[SUBMITTED]$(NC) Job array ID: $$job_id"; \
-	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/array_job_$$job_id*.out"
-
-test-python: ## 🐍 Run Python scientific simulation
-	@echo "$(BLUE)[TEST]$(NC) Submitting Python simulation..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/python_simulation.sh" | grep -o '[0-9]*'); \
-	echo "$(GREEN)[SUBMITTED]$(NC) Python simulation job ID: $$job_id"; \
-	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/python_simulation_$$job_id.out"
-
-test-apptainer: ## 📦 Run Apptainer container job
-	@echo "$(BLUE)[TEST]$(NC) Submitting Apptainer container job..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/apptainer_job.sh" | grep -o '[0-9]*'); \
-	echo "$(GREEN)[SUBMITTED]$(NC) Apptainer job ID: $${job_id}"; \
-	echo "$(YELLOW)[MONITOR]$(NC) Waiting for job $${job_id} to complete..."; \
-	while $(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && squeue -j $${job_id} | grep -q $${job_id}"; do \
-		sleep 5; \
-		echo "[WAIT]  Job $${job_id} still running..."; \
-		$(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && squeue -j $${job_id}"; \
-	done; \
-	echo "[INFO]  Job $${job_id} finished. Showing output:"; \
-	make show-job-output JOB_ID=$${job_id}
-
-test-ml: ## 🤖 Run machine learning simulation
-	@echo "$(BLUE)[TEST]$(NC) Submitting ML simulation..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/ml_simulation.sh" | grep -o '[0-9]*'); \
-	echo "$(GREEN)[SUBMITTED]$(NC) ML simulation job ID: $$job_id"; \
-	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/ml_simulation_$$job_id.out"
-
-test-mpi: ##  MPI Run MPI hello world job
-	@echo "$(BLUE)[TEST]$(NC) Submitting MPI Hello World job..."
-	@$(CLUSTER_MANAGER) submit ~/sample-jobs/mpi_job.sh
-
-test-distributed: ## 🌐 Run distributed multi-node simulation
-	@echo "$(BLUE)[TEST]$(NC) Submitting distributed simulation..."
-	@job_id=$$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sbatch ~/sample-jobs/distributed_simulation.sh" | grep -o '[0-9]*'); \
-	echo "$(GREEN)[SUBMITTED]$(NC) Distributed simulation job ID: $$job_id"; \
-	echo "$(YELLOW)[MONITOR]$(NC) Track with: squeue, or check output: ~/multi_container_$$job_id.out"
-
-test-extended: ## 🔬 Run all extended tests (Python, containers, ML, distributed)
-	@echo "$(GREEN)[INFO]$(NC) Running extended test suite..."
-	@echo "$(BLUE)[STEP 1/4]$(NC) Python simulation..."
-	@$(MAKE) test-python
-	@echo "$(BLUE)[STEP 2/4]$(NC) Apptainer container..."
-	@$(MAKE) test-apptainer  
-	@echo "$(BLUE)[STEP 3/4]$(NC) Machine learning..."
-	@$(MAKE) test-mpi
-	@echo "$(BLUE)[STEP 4/4]$(NC) Distributed simulation..."
-	@$(MAKE) test-distributed
-	@echo ""
-	@echo "$(GREEN)[SUCCESS]$(NC) Extended test suite submitted!"
-	@echo ""
-	@echo "$(BOLD)Monitor extended jobs:$(NC)"
-	@echo "  make status                    # Check all job status"
-	@echo "  make show-latest-outputs       # View latest outputs"
-	@echo "  make wait-for-jobs            # Wait for completion"
-
-## 📊 Monitoring Targets
-
-show-outputs: ## 📄 Display recent job output files
-	@echo "$(BOLD)=== Recent Job Outputs ===$(NC)"
-	@echo ""
-	@echo "$(BLUE)[JOB OUTPUT FILES ON ALL NODES]$(NC)"
-	@for node in controller node1 node2 node3; do \
-		echo "$(YELLOW)--- $$node ---$(NC)"; \
-		$(VAGRANT_WRAPPER) ssh $$node -c "ls -la /home/vagrant/*.out /home/vagrant/*.err 2>/dev/null | tail -5" || echo "No output files on $$node"; \
-		echo ""; \
-	done
-	@echo ""
-	@echo "$(BLUE)[LATEST HELLO WORLD OUTPUT]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh node1 -c "if [ -f /home/vagrant/hello_world_17.out ]; then echo 'File: hello_world_17.out'; echo '---'; cat /home/vagrant/hello_world_17.out | head -15; echo '---'; else echo 'No hello_world_17.out found'; fi" || echo "$(YELLOW)Cannot access node1$(NC)"
-	@echo ""
-	@echo "$(BLUE)[LATEST PARALLEL OUTPUT]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh node2 -c "if [ -f /home/vagrant/parallel_hello_18.out ]; then echo 'File: parallel_hello_18.out'; echo '---'; cat /home/vagrant/parallel_hello_18.out | head -20; echo '---'; else echo 'No parallel_hello_18.out found'; fi" || echo "$(YELLOW)Cannot access node2$(NC)"
-	@echo ""
-	@echo "$(BLUE)[LATEST CPU STRESS OUTPUT]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh node1 -c "if [ -f /home/vagrant/cpu_stress_19.out ]; then echo 'File: cpu_stress_19.out'; echo '---'; cat /home/vagrant/cpu_stress_19.out | head -10; echo '---'; else echo 'No cpu_stress_19.out found'; fi" || echo "$(YELLOW)Cannot access node1$(NC)"
-	@echo ""
-	@echo "$(BLUE)[LATEST ARRAY JOB OUTPUT]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh node2 -c "if [ -f /home/vagrant/array_job_20_1.out ]; then echo 'File: array_job_20_1.out'; echo '---'; cat /home/vagrant/array_job_20_1.out; echo '---'; else echo 'No array_job_20_1.out found'; fi" || echo "$(YELLOW)Cannot access node2$(NC)"
-
-show-job-output: ## 📄 Show output for a specific job ID (usage: make show-job-output JOB_ID=17)
-	@if [ -z "$(JOB_ID)" ]; then \
-		echo "$(RED)[ERROR]$(NC) Please specify JOB_ID. Usage: make show-job-output JOB_ID=17"; \
-		exit 1; \
-	fi
-	@echo "$(BOLD)=== Job $(JOB_ID) Output ===$(NC)"
-	@echo ""
-	@echo "$(BLUE)[SEARCHING FOR JOB $(JOB_ID) OUTPUT FILES]$(NC)"
-	@found=false; \
-	for node in controller node1 node2 node3; do \
-		if $(VAGRANT_WRAPPER) status $$node | grep -q "running"; then \
-			echo "$(YELLOW)Checking $$node...$(NC)"; \
-			files=$$($(VAGRANT_WRAPPER) ssh $$node -c "ls -d /home/vagrant/*_$(JOB_ID).out /home/vagrant/*_$(JOB_ID).err /home/vagrant/*_$(JOB_ID)_*.out /home/vagrant/apptainer_test_$(JOB_ID).out /home/vagrant/apptainer_test_$(JOB_ID).err 2>/dev/null"); \
-			if [ -n "$$files" ]; then \
-				for file in $$files; do \
-					file=$$(echo $$file | tr -d '\r'); \
-					echo "$(GREEN)Found: $$file on $$node$(NC)"; \
-					echo "---"; \
-					$(VAGRANT_WRAPPER) ssh $$node -c "cat '$$file'"; \
-					echo "---"; \
-					echo ""; \
-					found=true; \
-				done; \
-			fi; \
-		fi; \
-	done
-	@if [ "$$found" = "false" ]; then \
-		echo "$(YELLOW)No output files found for job $(JOB_ID).$(NC)"; \
+build-base: setup-repos preflight build-vagrant ## 📦 Create base box with Slurm pre-compiled
+	@if $(VAGRANT_WRAPPER) box list | grep -q "slurm-base"; then \
+		echo "$(GREEN)[INFO]$(NC) Reusable Slurm base box already exists. Skipping build."; \
+	else \
+		echo "$(YELLOW)[INFO]$(NC) Creating reusable Slurm base box... (This may take 10-15 minutes)"; \
+		$(MAKE) remove-base; \
+		SLURM_BUILD_BASE=true $(VAGRANT_WRAPPER) up base; \
+		$(VAGRANT_WRAPPER) halt base; \
+		$(VAGRANT_WRAPPER) package base --output slurm-base.box; \
+		$(VAGRANT_WRAPPER) box add --force --name slurm-base slurm-base.box; \
+		$(VAGRANT_WRAPPER) destroy -f base; \
+		rm -f slurm-base.box; \
+		echo "$(GREEN)[SUCCESS]$(NC) Slurm base box created successfully."; \
 	fi
 
-show-latest-outputs: ## 📄 Show the most recent job outputs with smart detection
-	@echo "$(BOLD)=== Latest Job Outputs ===$(NC)"
-	@echo ""
-	@echo "$(BLUE)[MOST RECENT HELLO WORLD]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh node1 -c "latest=\$$(ls -t /home/vagrant/hello_world_*.out 2>/dev/null | head -1); if [ -n \"\$$latest\" ]; then echo \"File: \$$latest\"; echo '---'; cat \"\$$latest\" | head -15; echo '---'; else echo 'No hello world outputs found'; fi" || echo "$(YELLOW)Cannot access node1$(NC)"
-	@echo ""
-	@echo "$(BLUE)[MOST RECENT PARALLEL JOB]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh node2 -c "latest=\$$(ls -t /home/vagrant/parallel_hello_*.out 2>/dev/null | head -1); if [ -n \"\$$latest\" ]; then echo \"File: \$$latest\"; echo '---'; cat \"\$$latest\" | head -20; echo '---'; else echo 'No parallel job outputs found'; fi" || echo "$(YELLOW)Cannot access node2$(NC)"
-	@echo ""
-	@echo "$(BLUE)[MOST RECENT CPU STRESS]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh node1 -c "latest=\$$(ls -t /home/vagrant/cpu_stress_*.out 2>/dev/null | head -1); if [ -n \"\$$latest\" ]; then echo \"File: \$$latest\"; echo '---'; cat \"\$$latest\"; echo '---'; else echo 'No CPU stress outputs found'; fi" || echo "$(YELLOW)Cannot access node1$(NC)"
-	@echo ""
-	@echo "$(BLUE)[MOST RECENT ARRAY JOB]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh node2 -c "latest=\$$(ls -t /home/vagrant/array_job_*.out 2>/dev/null | head -1); if [ -n \"\$$latest\" ]; then echo \"File: \$$latest\"; echo '---'; cat \"\$$latest\"; echo '---'; else echo 'No array job outputs found'; fi" || echo "$(YELLOW)Cannot access node2$(NC)"
+remove-base: ## 🗑️ Remove the Slurm base box
+	@echo "$(YELLOW)[INFO]$(NC) Removing existing Slurm base box..."
+	@if $(VAGRANT_WRAPPER) box list | grep -q "slurm-base"; then \
+		$(VAGRANT_WRAPPER) box remove -f slurm-base; \
+		echo "$(GREEN)[SUCCESS]$(NC) Removed slurm-base box."; \
+	else \
+		echo "$(BLUE)[INFO]$(NC) No slurm-base box found to remove."; \
+	fi
+	@# Also destroy the base VM if it exists
+	@if $(VAGRANT_WRAPPER) status base | grep -q "running"; then \
+		$(VAGRANT_WRAPPER) destroy -f base; \
+	fi
 
-show-all-outputs: ## 📄 Display all job output files from all nodes
-	@echo "$(BOLD)=== All Job Outputs ===$(NC)"
-	@echo ""
-	@for node in controller node1 node2 node3; do \
-		if $(VAGRANT_WRAPPER) status $$node | grep -q "running"; then \
-			echo "$(BLUE)[$$node OUTPUT FILES]$(NC)"; \
-			files=$$($(VAGRANT_WRAPPER) ssh $$node -c "ls /home/vagrant/*.out 2>/dev/null" || true); \
-			if [ -n "$$files" ]; then \
-				for file in $$files; do \
-					echo "$(YELLOW)$$file:$(NC)"; \
-					echo "---"; \
-					$(VAGRANT_WRAPPER) ssh $$node -c "head -10 $$file"; \
-					echo "... (showing first 10 lines)"; \
-					echo "---"; \
-					echo ""; \
-				done; \
-			else \
-				echo "No output files on $$node"; \
-			fi; \
-			echo ""; \
-		fi; \
-	done
+list-boxes: ## 📦 List all available Vagrant boxes
+	@echo "$(BLUE)[INFO]$(NC) Available Vagrant boxes:"
+	@$(VAGRANT_WRAPPER) box list
 
-wait-for-jobs: ## ⏳ Wait for all jobs to complete and show results
-	@echo "$(YELLOW)[WAITING]$(NC) Waiting for all jobs to complete..."
-	@while [ $$($(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && squeue -h | wc -l" 2>/dev/null || echo "0") -gt 0 ]; do \
-		echo "$(BLUE)[STATUS]$(NC) Jobs still running..."; \
-		$(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && squeue" 2>/dev/null || true; \
-		sleep 10; \
-	done
-	@echo "$(GREEN)[COMPLETE]$(NC) All jobs finished!"
-	@echo ""
-	@$(MAKE) show-outputs
+## 🛠️ Cluster Control
 
-test-and-wait: ## 🧪⏳ Run all tests and wait for completion with results
-	@echo "$(GREEN)[INFO]$(NC) Running comprehensive test with monitoring..."
-	@$(MAKE) test
-	@$(MAKE) wait-for-jobs
-	@echo ""
-	@echo "$(GREEN)[SUCCESS]$(NC) All tests completed with results displayed!"
+test: test-hello test-parallel test-stress test-array ## 🧪 Run all sample jobs
+	@echo "$(GREEN)[SUCCESS]$(NC) All primary tests submitted. Use 'make status' to monitor."
 
-status: ## 📊 Show comprehensive cluster and job status
-	@echo "$(BOLD)=== Cluster Status ===$(NC)"
-	@echo ""
-	@echo "$(BLUE)[VM STATUS]$(NC)"
-	@$(VAGRANT_WRAPPER) status || echo "$(RED)Error getting VM status$(NC)"
-	@echo ""
-	@echo "$(BLUE)[SLURM STATUS]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && echo 'Cluster Info:' && sinfo && echo '' && echo 'Node Details:' && scontrol show nodes | grep -E '(NodeName|State|CPUAlloc)'" 2>/dev/null || echo "$(YELLOW)Slurm not ready yet$(NC)"
-	@echo ""
-	@echo "$(BLUE)[ACTIVE JOBS]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && squeue -o '%.8i %.12j %.8u %.8T %.10M %.6D %R'" 2>/dev/null || echo "$(YELLOW)No jobs in queue$(NC)"
-	@echo ""
-	@echo "$(BLUE)[RECENT COMPLETED JOBS]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh controller -c "source /etc/profile.d/slurm.sh && sacct --format=JobID%10,JobName%15,State%12,ExitCode%8,Start%19,End%19,NodeList%10 -S now-1hour" 2>/dev/null || echo "$(YELLOW)No recent job history$(NC)"
-	@echo ""
-	@echo "$(BLUE)[JOB OUTPUT FILES]$(NC)"
-	@$(VAGRANT_WRAPPER) ssh controller -c "ls -la ~/*.out ~/*.err 2>/dev/null | tail -5" 2>/dev/null || echo "$(YELLOW)No output files found$(NC)"
-	@echo ""
-	@echo "$(YELLOW)Quick commands:$(NC)"
-	@echo "  make show-outputs     # View job outputs"
-	@echo "  make wait-for-jobs    # Wait for jobs to finish"
-	@echo "  make test-and-wait    # Run tests and monitor"
+status: ## 📊 Show cluster status and job queue
+	@$(CLUSTER_MANAGER) status
 
-connect: ## 🔗 SSH to controller node
-	@echo "$(GREEN)[INFO]$(NC) Connecting to controller node..."
-	@echo "$(YELLOW)Tip:$(NC) Once connected, run:"
-	@echo "  source /etc/profile.d/slurm.sh"
-	@echo "  sinfo              # Check cluster"
-	@echo "  squeue             # Monitor jobs"
-	@echo "  exit               # Return to host"
-	@echo ""
+connect: ## 🔌 SSH to the controller node
 	@$(VAGRANT_WRAPPER) ssh controller
 
-logs: ## 📋 Display Slurm service logs
-	@echo "$(BLUE)[LOGS]$(NC) Slurm Controller Logs:"
-	@$(VAGRANT_WRAPPER) ssh controller -c "sudo tail -20 /var/log/slurm/slurmctld.log" 2>/dev/null || echo "$(RED)Cannot access slurmctld logs$(NC)"
-	@echo ""
-	@echo "$(BLUE)[LOGS]$(NC) Slurm Database Logs:"
-	@$(VAGRANT_WRAPPER) ssh controller -c "sudo tail -20 /var/log/slurm/slurmdbd.log" 2>/dev/null || echo "$(RED)Cannot access slurmdbd logs$(NC)"
+logs: ## 📜 Tail logs for a specific node (e.g., make logs node=controller)
+	@$(VAGRANT_WRAPPER) ssh $(node) -- -t "sudo journalctl -fu slurmd"
 
-health: ## 🏥 Perform comprehensive health check
-	@echo "$(GREEN)[INFO]$(NC) Performing cluster health check..."
-	@$(CLUSTER_MANAGER) health || echo "$(YELLOW)Some health checks failed - cluster may still be starting$(NC)"
+health: ## ❤️ Perform a health check of the cluster
+	@$(CLUSTER_MANAGER) health-check
+
+stop: ## 🛑 Stop all running VMs
+	@echo "$(YELLOW)[INFO]$(NC) Stopping all cluster VMs..."
+	@$(VAGRANT_WRAPPER) halt controller node1 node2
+
+start: ## ▶️ Start all cluster VMs
+	@echo "$(GREEN)[INFO]$(NC) Starting all cluster VMs..."
+	@$(VAGRANT_WRAPPER) up --no-provision controller node1 node2
+
+clean-vms: ## 🧹 Destroy cluster VMs but keep base box
+	@echo "$(YELLOW)[INFO]$(NC) Destroying cluster VMs (controller, node1, node2)..."
+	@$(VAGRANT_WRAPPER) destroy -f controller node1 node2
+	@echo "$(GREEN)[SUCCESS]$(NC) Cluster VMs destroyed."
+
+clean: ## 🗑️ Destroy all VMs and remove the base box
+	@echo "$(RED)[DANGER]$(NC) This will destroy all VMs and the base box."
+	@read -p "Are you sure? [y/N] " -n 1 -r; \
+	echo; \
+	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
+		echo "Destroying all VMs..."; \
+		$(VAGRANT_WRAPPER) destroy -f; \
+		$(MAKE) remove-base; \
+		echo "Cleaning up repositories..."; \
+		rm -rf tmp; \
+		echo "$(GREEN)[SUCCESS]$(NC) Full cleanup complete."; \
+	else \
+		echo "Cleanup cancelled."; \
+	fi
+
+force-clean: ## 💥 Force destroy all VMs and data without confirmation
+	@echo "$(RED)[DANGER]$(NC) Forcibly destroying all VMs, base box, and repositories..."
+	@$(VAGRANT_WRAPPER) destroy -f
+	@$(MAKE) remove-base
+	@rm -rf tmp
+	@echo "$(GREEN)[SUCCESS]$(NC) Forced cleanup complete."
 
 ## 🌐 Web Interfaces
 
-ondemand: ## 🌐 Open the Open OnDemand web portal
-	@echo "$(GREEN)[INFO]$(NC) Opening Open OnDemand portal at http://localhost:8080"
-	@xdg-open http://localhost:8080 >/dev/null 2>&1 || echo "Please open http://localhost:8080 in your browser."
+ondemand: ## 🌐 Start Open OnDemand service
+	@echo "$(BLUE)[INFO]$(NC) Ensuring Open OnDemand is set up..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "/home/vagrant/scripts/setup-ondemand.sh"
+	@echo "$(GREEN)[SUCCESS]$(NC) Open OnDemand is running. Access at http://localhost:8080"
 
-slurm-web: ## 🌐 Open the Slurm-Web interface
-	@echo "$(GREEN)[INFO]$(NC) Opening Slurm-Web interface at http://localhost:8081"
-	@xdg-open http://localhost:8081 >/dev/null 2>&1 || echo "Please open http://localhost:8081 in your browser."
+slurm-web: ## 🌐 Start slurm-web service
+	@echo "$(BLUE)[INFO]$(NC) Ensuring slurm-web is set up..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "/home/vagrant/scripts/setup-slurm-web.sh"
+	@echo "$(GREEN)[SUCCESS]$(NC) slurm-web is running. Access at http://localhost:8081"
 
-## 🔧 Management Targets
+## 📜 Job Testing Targets
 
-stop: ## ⏹️ Stop all VMs (preserves state for restart)
-	@echo "$(YELLOW)[INFO]$(NC) Stopping cluster VMs..."
-	@$(VAGRANT_WRAPPER) halt
-	@echo "$(GREEN)[SUCCESS]$(NC) Cluster stopped. Use 'make start' to resume."
+# Helper for waiting
+define wait_for_jobs
+    @echo "$(BLUE)[INFO]$(NC) Waiting for all jobs to complete..."
+    @timeout 300s $(VAGRANT_WRAPPER) ssh controller -- "while squeue | grep -q 'vagrant'; do echo -n '.'; sleep 5; done; echo"
+    @echo "$(GREEN)[SUCCESS]$(NC) All jobs completed."
+endef
 
-start: ## ▶️ Start stopped VMs
-	@echo "$(GREEN)[INFO]$(NC) Starting cluster VMs..."
-	@$(VAGRANT_WRAPPER) up
-	@echo "$(GREEN)[SUCCESS]$(NC) Cluster started."
+test-and-wait: test ## 🧪 Run all tests and wait for completion
+	@$(call wait_for_jobs)
+	@$(MAKE) show-all-outputs
 
-restart: stop start ## 🔄 Restart the entire cluster (stop and start)
-	@echo "$(GREEN)[SUCCESS]$(NC) Cluster restart complete!"
+test-hello: ## 👋 Submit a simple 'hello world' job
+	@echo "$(BLUE)[TEST]$(NC) Submitting Hello World job..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/hello_world.sh"
 
-clean: ## 🧹 Stop and completely remove all VMs
-	@echo "$(RED)[WARNING]$(NC) This will destroy all VMs and data!"
-	@echo "Type 'yes' to continue or anything else to cancel:"
-	@read REPLY && \
-	if [ "$$REPLY" = "yes" ]; then \
-		echo "$(YELLOW)[INFO]$(NC) Destroying cluster..."; \
-		$(VAGRANT_WRAPPER) destroy -f || true; \
-		rm -rf .vagrant; \
-		echo "$(BLUE)[INFO]$(NC) Removing Slurm base box..."; \
-		$(VAGRANT_WRAPPER) box remove slurm-base -f 2>/dev/null || true; \
-		echo "$(BLUE)[INFO]$(NC) Cleaning up any remaining VirtualBox VMs..."; \
-		for vm in $$(VBoxManage list vms | grep -E "(slurm-|vagrant-)" | cut -d'"' -f2); do \
-			echo "$(YELLOW)[CLEANUP]$(NC) Removing VM: $$vm"; \
-			VBoxManage controlvm "$$vm" poweroff 2>/dev/null || true; \
-			VBoxManage unregistervm "$$vm" --delete 2>/dev/null || true; \
-		done; \
-		echo "$(BLUE)[INFO]$(NC) Cleaning up build artifacts..."; \
-		rm -f slurm-base.box; \
-		echo "$(GREEN)[SUCCESS]$(NC) Cluster destroyed."; \
+test-parallel: ## 👯 Submit a simple parallel (MPI) job
+	@echo "$(BLUE)[TEST]$(NC) Submitting Parallel Hello (MPI) job..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/parallel_hello.sh"
+
+test-stress: ## 💪 Submit a CPU stress test job
+	@echo "$(BLUE)[TEST]$(NC) Submitting CPU Stress Test job..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/cpu_stress.sh"
+
+test-array: ## 🔢 Submit a job array
+	@echo "$(BLUE)[TEST]$(NC) Submitting Job Array..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/array_job.sh"
+
+test-python: ## 🐍 Submit a Python simulation job
+	@echo "$(BLUE)[TEST]$(NC) Submitting Python Simulation job..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/python_simulation.sh"
+
+test-apptainer: ## 📦 Submit an Apptainer/Singularity job
+	@echo "$(BLUE)[TEST]$(NC) Submitting Apptainer job..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/apptainer_job.sh"
+
+test-ml: ## 🧠 Submit a mock ML training job
+	@echo "$(BLUE)[TEST]$(NC) Submitting ML Simulation job..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/ml_simulation.sh"
+
+test-distributed: ## 🌐 Submit a distributed simulation job
+	@echo "$(BLUE)[TEST]$(NC) Submitting Distributed Simulation job..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/distributed_simulation.sh"
+
+test-mpi: ## 🚀 Submit a basic MPI job
+	@echo "$(BLUE)[TEST]$(NC) Submitting basic MPI job..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/mpi_job.sh"
+
+test-extended: test-python test-apptainer test-ml test-distributed test-mpi ## 🧪 Run extended tests
+	@echo "$(GREEN)[SUCCESS]$(NC) All extended tests submitted."
+
+## 📄 Job Output Management
+
+show-outputs: ## 📄 Show output of a specific job (e.g., make show-outputs job_id=1)
+	@echo "$(BLUE)[INFO]$(NC) Showing output for job $(job_id)..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "cat slurm-$(job_id).out"
+
+show-job-output: ## 📄 Show output for a specific job script (e.g., make show-job-output script=hello_world.sh)
+	@job_id=`$(VAGRANT_WRAPPER) ssh controller -c "squeue -o '%A %j' | grep '$(script)' | cut -d' ' -f1"`; \
+	if [ -n "$$job_id" ]; then \
+		echo "Showing output for job $$job_id (slurm-$$job_id.out)"; \
+		$(VAGRANT_WRAPPER) ssh controller -c "cat slurm-$$job_id.out"; \
 	else \
-		echo "$(BLUE)[INFO]$(NC) Cancelled."; \
+		echo "Could not find job for script $(script)"; \
 	fi
 
-force-clean: ## 🧨 Force cleanup all VMs without confirmation (use with caution)
-	@echo "$(RED)[WARNING]$(NC) Force cleaning all Slurm-related VMs..."
-	@$(VAGRANT_WRAPPER) destroy -f || true
-	@rm -rf .vagrant
-	@echo "$(BLUE)[INFO]$(NC) Removing Slurm base box..."
-	@$(VAGRANT_WRAPPER) box remove slurm-base -f 2>/dev/null || true
-	@echo "$(BLUE)[INFO]$(NC) Cleaning up any remaining VirtualBox VMs..."
-	@for vm in $$(VBoxManage list vms | grep -E "(slurm-|vagrant-)" | cut -d'"' -f2); do \
-		echo "$(YELLOW)[CLEANUP]$(NC) Removing VM: $$vm"; \
-		VBoxManage controlvm "$$vm" poweroff 2>/dev/null || true; \
-		VBoxManage unregistervm "$$vm" --delete 2>/dev/null || true; \
-	done
-	@echo "$(BLUE)[INFO]$(NC) Cleaning up build artifacts..."
-	@rm -f slurm-base.box
-	@echo "$(GREEN)[SUCCESS]$(NC) Force cleanup completed."
+show-all-outputs: ## 📄 Show outputs of all completed jobs
+	@echo "$(BLUE)[INFO]$(NC) Showing outputs of all completed jobs in ~/ ..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "cat ~/slurm-*.out"
 
-clean-vms: ## 🧽 Remove cluster VMs but keep base box (preserves build time)
-	@echo "$(YELLOW)[INFO]$(NC) Removing cluster VMs while preserving base box..."
-	@echo "Type 'yes' to continue or anything else to cancel:"
-	@read REPLY && \
-	if [ "$$REPLY" = "yes" ]; then \
-		echo "$(BLUE)[INFO]$(NC) Destroying cluster VMs..."; \
-		$(VAGRANT_WRAPPER) destroy -f controller node1 node2 node3 2>/dev/null || true; \
-		rm -rf .vagrant; \
-		echo "$(BLUE)[INFO]$(NC) Cleaning up cluster VirtualBox VMs..."; \
-		for vm in $$(VBoxManage list vms | grep -E "(controller|node[0-9]+)" | cut -d'"' -f2); do \
-			echo "$(YELLOW)[CLEANUP]$(NC) Removing VM: $$vm"; \
-			VBoxManage controlvm "$$vm" poweroff 2>/dev/null || true; \
-			VBoxManage unregistervm "$$vm" --delete 2>/dev/null || true; \
-		done; \
-		echo "$(GREEN)[SUCCESS]$(NC) Cluster VMs destroyed. Base box preserved."; \
-		echo "$(BLUE)[TIP]$(NC) Use 'make cluster' for fast redeployment with preserved base box"; \
+show-latest-outputs: ## 📄 Show the most recent job output
+	@echo "$(BLUE)[INFO]$(NC) Showing the most recent job output..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "ls -t ~/slurm-*.out | head -n 1 | xargs cat"
+
+## 🛠️ Setup & Preflight
+
+setup-repos: ## 📥 Clone required source repositories
+	@echo "$(BLUE)[INFO]$(NC) Setting up required source repositories..."
+	@if [ -d "tmp/slurm" ] && [ -d "tmp/ondemand" ] && [ -d "tmp/slurm-web" ]; then \
+		echo "$(GREEN)[OK]$(NC) Repositories already exist. Skipping clone."; \
 	else \
-		echo "$(BLUE)[INFO]$(NC) Cancelled."; \
-	fi
-
-## 🔨 Build Targets
-
-preflight: ## ✈️ Run pre-flight checks
-	@echo "$(BLUE)[CHECK]$(NC) Running pre-flight checks..."
-	@if [ -f "$(PREFLIGHT_CHECK)" ]; then \
-		chmod +x $(PREFLIGHT_CHECK) && $(PREFLIGHT_CHECK); \
-	else \
-		echo "$(YELLOW)[SKIP]$(NC) Pre-flight check not found"; \
-	fi
-
-build-base: preflight build-vagrant ## 🏗️ Create base Slurm box (build once, use many times)
-	@echo "$(GREEN)[INFO]$(NC) Creating reusable Slurm base box..."
-	@if ! $(VAGRANT_WRAPPER) box list | grep -q "slurm-base"; then \
-		echo "$(YELLOW)[STEP 1/4]$(NC) Building base VM with Slurm (~10-15 minutes)..."; \
-		$(VAGRANT_WRAPPER) up base; \
-		echo "$(YELLOW)[STEP 2/4]$(NC) Packaging base box..."; \
-		$(VAGRANT_WRAPPER) package base --output slurm-base.box; \
-		echo "$(YELLOW)[STEP 3/4]$(NC) Adding to Vagrant..."; \
-		$(VAGRANT_WRAPPER) box add slurm-base slurm-base.box; \
-		echo "$(YELLOW)[STEP 4/4]$(NC) Cleaning up..."; \
-		$(VAGRANT_WRAPPER) destroy base -f; \
-		rm -f slurm-base.box; \
-		echo "$(GREEN)[SUCCESS]$(NC) Base box 'slurm-base' created!"; \
-		echo "$(BLUE)[INFO]$(NC) You can now use 'make cluster' for fast deployments"; \
-	else \
-		echo "$(GREEN)[INFO]$(NC) Base box 'slurm-base' already exists"; \
-		echo "$(BLUE)[TIP]$(NC) Use 'make remove-base' to rebuild it"; \
-	fi
-
-remove-base: ## 🗑️ Remove base box (force rebuild)
-	@echo "$(YELLOW)[INFO]$(NC) Removing Slurm base box..."
-	@$(VAGRANT_WRAPPER) box remove slurm-base -f || echo "Base box not found"
-	@echo "$(GREEN)[SUCCESS]$(NC) Base box removed. Use 'make build-base' to recreate."
-
-list-boxes: ## 📦 List available Vagrant boxes
-	@echo "$(BOLD)Available Vagrant Boxes:$(NC)"
-	@$(VAGRANT_WRAPPER) box list
-
-build-vagrant: setup-repos ## 🔨 Build Vagrant from source if needed
-	@echo "$(BLUE)[BUILD]$(NC) Ensuring Vagrant is available..."
-	@if [ ! -f "$(VAGRANT_WRAPPER)" ]; then \
-		echo "$(YELLOW)[INFO]$(NC) Vagrant wrapper not found, setting up..."; \
-		echo "Please ensure Vagrant source is available in vagrant-src/"; \
-	else \
-		chmod +x $(VAGRANT_WRAPPER); \
-		echo "$(GREEN)[OK]$(NC) Vagrant wrapper ready"; \
-	fi
-
-setup-slurm-source: ## 📦 Setup Slurm source repository (for metal ISO creation)
-	@echo "$(BLUE)[SETUP]$(NC) Setting up Slurm source repository..."
-	@if [ -d "tmp/slurm" ]; then \
-		echo "$(GREEN)[OK]$(NC) Slurm source already exists"; \
-		if [ -d "tmp/slurm/.git" ]; then \
-			echo "$(BLUE)[INFO]$(NC) Updating Slurm repository..."; \
-			cd tmp/slurm && git pull; \
-		else \
-			echo "$(GREEN)[SKIP]$(NC) Slurm source exists but is not a git repo"; \
-		fi \
-	else \
-		echo "$(BLUE)[INFO]$(NC) Cloning Slurm repository..."; \
-		mkdir -p tmp; \
-		git clone https://github.com/SchedMD/slurm.git tmp/slurm; \
-		echo "$(GREEN)[SUCCESS]$(NC) Slurm source ready"; \
-	fi
-
-setup-repos: ## 📦 Clone and setup required repositories
-	@echo "$(BLUE)[SETUP]$(NC) Setting up required repositories..."
-	@if [ ! -f "./setup-repos.sh" ]; then \
-		echo "$(RED)[ERROR]$(NC) setup-repos.sh not found!"; \
-		exit 1; \
-	fi
-	@chmod +x ./setup-repos.sh
-	@if [ -d "tmp/vagrant-src" ] && [ -d "tmp/slurm" ]; then \
-		echo "$(GREEN)[OK]$(NC) Repositories already exist"; \
-		if [ -d "tmp/vagrant-src/.git" ] && [ -d "tmp/slurm/.git" ]; then \
-			echo "$(BLUE)[INFO]$(NC) Updating existing repositories..."; \
-			./setup-repos.sh; \
-		else \
-			echo "$(GREEN)[SKIP]$(NC) Repositories exist but are not git repos"; \
-		fi \
-	else \
-		echo "$(BLUE)[INFO]$(NC) Cloning repositories for the first time..."; \
 		./setup-repos.sh; \
 	fi
 
-## 🐛 Debug Targets
+preflight: ## ✅ Run preflight checks for dependencies
+	@echo "$(BLUE)[INFO]$(NC) Running preflight checks..."
+	@$(PREFLIGHT_CHECK)
 
-debug: ## 🐛 Show debug information
-	@echo "$(BOLD)=== Debug Information ===$(NC)"
-	@echo ""
-	@echo "$(BLUE)[SYSTEM]$(NC)"
-	@echo "OS: $$(uname -a)"
-	@echo "VirtualBox: $$(VBoxManage --version 2>/dev/null || echo 'Not found')"
-	@echo "Ruby: $$(ruby --version 2>/dev/null || echo 'Not found')"
-	@echo ""
-	@echo "$(BLUE)[PROJECT]$(NC)"
-	@echo "Directory: $$(pwd)"
-	@echo "Vagrant wrapper: $$(test -f $(VAGRANT_WRAPPER) && echo 'Found' || echo 'Missing')"
-	@echo "Cluster manager: $$(test -f $(CLUSTER_MANAGER) && echo 'Found' || echo 'Missing')"
-	@echo ""
-	@echo "$(BLUE)[CLUSTER]$(NC)"
-	@$(VAGRANT_WRAPPER) status 2>/dev/null || echo "No VMs found"
-
-inspect: ## 🔍 Inspect cluster configuration
-	@echo "$(BOLD)=== Cluster Configuration ===$(NC)"
-	@echo ""
-	@echo "$(BLUE)[VAGRANTFILE]$(NC)"
-	@grep -E "(vm\.box|memory|cpus|ip)" Vagrantfile || echo "Vagrantfile not found"
-	@echo ""
-	@echo "$(BLUE)[SAMPLE JOBS]$(NC)"
-	@ls -la sample-jobs/ 2>/dev/null || echo "Sample jobs not found"
-	@echo ""
-	@echo "$(BLUE)[SCRIPTS]$(NC)"
-	@ls -la scripts/ 2>/dev/null || echo "Scripts not found"
-
-## 📋 Information Targets
-
-info: ## ℹ️ Show cluster information
-	@echo "$(BOLD)Slurm HPC Cluster Information$(NC)"
-	@echo "=============================="
-	@echo ""
-	@echo "$(GREEN)Architecture:$(NC)"
-	@echo "  • 1 Controller node (2 CPU, 2GB RAM) - Slurm controller + database"
-	@echo "  • 3 Compute nodes (2 CPU, 1GB RAM each) - Slurm compute daemons"
-	@echo "  • Private network: 192.168.60.0/24"
-	@echo "  • Shared NFS storage across all nodes"
-	@echo ""
-	@echo "$(GREEN)Sample Jobs:$(NC)"
-	@echo "  • hello_world.sh   - Basic system info job"
-	@echo "  • parallel_hello.sh - Multi-node parallel job"
-	@echo "  • cpu_stress.sh    - CPU-intensive workload"
-	@echo "  • array_job.sh     - Job array example"
-	@echo ""
-	@echo "$(GREEN)Quick Commands:$(NC)"
-	@echo "  make cluster       # Complete setup"
-	@echo "  make test          # Run all sample jobs" 
-	@echo "  make status        # Check cluster status"
-	@echo "  make connect       # SSH to controller"
-
-version: ## 📈 Show version information
-	@echo "$(BOLD)Version Information$(NC)"
-	@echo "==================="
-	@echo "Project: Slurm HPC Cluster with Vagrant"
-	@echo "Built: $$(date)"
-	@echo "Vagrant: $$($(VAGRANT_WRAPPER) --version 2>/dev/null || echo 'Not available')"
-	@echo "VirtualBox: $$(VBoxManage --version 2>/dev/null || echo 'Not available')"
-	@echo "Ruby: $$(ruby --version 2>/dev/null || echo 'Not available')"
-
-## 🏗️ Bare Metal Deployment
-
-metal: setup-slurm-source ## 🏗️ Create custom Ubuntu ISO for automated bare metal deployment
-	@echo "$(BOLD)🏗️ Creating HPC Cluster Custom ISO$(NC)"
-	@echo "====================================="
-	@echo ""
-	@echo "$(BLUE)[INFO]$(NC) This will create a custom Ubuntu Desktop ISO with HPC stack pre-installed"
-	@echo "$(BLUE)[INFO]$(NC) Uses Ubuntu Desktop ISO for complete live system modification"
-	@echo "$(BLUE)[INFO]$(NC) The ISO can be used to deploy the cluster on bare metal servers"
-	@echo ""
-	@if [ ! -f "./scripts/create-metal-iso.sh" ]; then \
-		echo "$(RED)[ERROR]$(NC) Metal ISO creation script not found!"; \
+setup-libvirt: ## 🔧 Install libvirt and required tools
+	@echo "$(BLUE)[INFO]$(NC) Installing libvirt, Vagrant, and required plugins..."
+	@if ! command -v vagrant &> /dev/null; then \
+		echo "Vagrant not found. Please install it first."; \
 		exit 1; \
 	fi
-	@chmod +x ./scripts/create-metal-iso.sh
+	@sudo apt-get update
+	@sudo apt-get install -y libvirt-daemon-system libvirt-clients qemu-kvm ebtables dnsmasq-base
+	@vagrant plugin install vagrant-libvirt
+	@echo "$(GREEN)[SUCCESS]$(NC) Libvirt setup is complete."
+
+build-vagrant: ## 🏗️ Build the vagrant-wrapper utility
+	@if [ -x "$(VAGRANT_WRAPPER)" ]; then \
+		echo "$(BLUE)[INFO]$(NC) vagrant-wrapper.sh is executable. Skipping build."; \
+	else \
+		echo "$(RED)[ERROR]$(NC) $(VAGRANT_WRAPPER) not found or not executable."; \
+		exit 1; \
+	fi
+
+## ⚙️ Bare Metal Deployment (Advanced)
+
+metal: ## 💿 Create custom Ubuntu ISO for bare metal deployment
+	@echo "$(BLUE)[INFO]$(NC) Creating custom Ubuntu ISO for HPC deployment..."
 	@./scripts/create-metal-iso.sh
-	@echo ""
-	@echo "$(GREEN)[SUCCESS]$(NC) Custom HPC ISO creation complete!"
 
-sim-metal: ## 🖥️ Simulate bare metal installation using QEMU
-	@echo "$(BOLD)🖥️ Starting HPC Cluster Metal Simulation$(NC)"
-	@echo "========================================"
-	@echo ""
-	@if [ ! -f "./scripts/simulate-metal.sh" ]; then \
-		echo "$(RED)[ERROR]$(NC) Metal simulation script not found!"; \
-		exit 1; \
-	fi
-	@chmod +x ./scripts/simulate-metal.sh
+sim-metal: ## 🖥️ Simulate bare metal installation with QEMU
+	@echo "$(BLUE)[INFO]$(NC) Starting bare metal simulation with QEMU..."
 	@./scripts/simulate-metal.sh start
 
-sim-metal-status: ## 📊 Show QEMU simulation status
-	@if [ ! -f "./scripts/simulate-metal.sh" ]; then \
-		echo "$(RED)[ERROR]$(NC) Metal simulation script not found!"; \
-		exit 1; \
-	fi
+sim-metal-status: ## 📊 Check status of the QEMU simulation
 	@./scripts/simulate-metal.sh status
 
-sim-metal-stop: ## ⏹️ Stop QEMU simulation
-	@echo "$(BLUE)[INFO]$(NC) Stopping metal simulation..."
-	@if [ ! -f "./scripts/simulate-metal.sh" ]; then \
-		echo "$(RED)[ERROR]$(NC) Metal simulation script not found!"; \
-		exit 1; \
-	fi
+sim-metal-stop: ## 🛑 Stop the QEMU simulation
 	@./scripts/simulate-metal.sh stop
 
-sim-metal-clean: ## 🧹 Clean QEMU simulation workspace
-	@echo "$(BLUE)[INFO]$(NC) Cleaning metal simulation workspace..."
-	@if [ ! -f "./scripts/simulate-metal.sh" ]; then \
-		echo "$(RED)[ERROR]$(NC) Metal simulation script not found!"; \
-		exit 1; \
-	fi
+sim-metal-clean: ## 🧹 Clean up QEMU simulation files
 	@./scripts/simulate-metal.sh clean
 
-sim-metal-connect: ## 🔗 Show VNC connection info for QEMU simulation
-	@if [ ! -f "./scripts/simulate-metal.sh" ]; then \
-		echo "$(RED)[ERROR]$(NC) Metal simulation script not found!"; \
-		exit 1; \
-	fi
-	@./scripts/simulate-metal.sh connect
+sim-metal-connect: ## 🔌 Connect to the simulated controller via VNC
+	@./qemu-workspace/connect-vnc.sh
 
 metal-clean: ## 🧹 Clean up ISO workspace and generated files
-	@echo "$(BLUE)[INFO]$(NC) Cleaning up ISO workspace and generated files..."
-	@echo "$(YELLOW)[CLEANUP]$(NC) Removing temporary ISO creation directories..."
-	@sudo rm -rf iso-workspace/iso-extract iso-workspace/iso-rebuild iso-workspace/squashfs-root 2>/dev/null || true
-	@rm -f iso-workspace/.squashfs_filename iso-workspace/install-hpc-stack.sh iso-workspace/grub.cfg 2>/dev/null || true
-	@echo "$(YELLOW)[CLEANUP]$(NC) Unmounting any mounted ISOs..."
-	@sudo umount /mnt 2>/dev/null || true
-	@echo "$(YELLOW)[CLEANUP]$(NC) Removing generated ISO files..."
-	@rm -f ubuntu-22.04-hpc-cluster.iso 2>/dev/null || true
-	@echo "$(YELLOW)[CLEANUP]$(NC) Cleaning up QEMU simulation workspace..."
-	@if [ -f "./scripts/simulate-metal.sh" ]; then \
-		./scripts/simulate-metal.sh clean 2>/dev/null || true; \
-	fi
-	@echo "$(GREEN)[SUCCESS]$(NC) ISO workspace cleaned up!"
-
-build-apptainer-image: ## 🔨 Build the Apptainer image for container jobs
-	@echo "$(BLUE)[BUILD]$(NC) Building Apptainer image for sample-jobs..."
-	@bash sample-jobs/build-apptainer-image.sh
-	@echo "$(GREEN)[SUCCESS]$(NC) Apptainer image built."
-
-# Error handling for missing files
-$(VAGRANT_WRAPPER):
-	@echo "$(RED)[ERROR]$(NC) Vagrant wrapper not found!"
-	@echo "Please ensure vagrant-wrapper.sh exists and is executable."
-	@exit 1
-
-$(CLUSTER_MANAGER):
-	@echo "$(RED)[ERROR]$(NC) Cluster manager not found!"
-	@echo "Please ensure cluster-manager.sh exists and is executable."
-	@exit 1
+	@echo "$(YELLOW)[INFO]$(NC) Cleaning up ISO workspace..."
+	@rm -rf iso-workspace/ubuntu-22.04-hpc-cluster.iso iso-workspace/iso-rebuild
+	@echo "$(GREEN)[SUCCESS]$(NC) ISO workspace cleaned."

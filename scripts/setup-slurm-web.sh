@@ -40,11 +40,6 @@ sudo -u vagrant /home/vagrant/.local/bin/pipx install /home/vagrant/tmp/slurm-we
 # Locate the slurm-web-gateway executable
 echo "--- Locating slurm-web-gateway executable ---"
 SLURM_WEB_GATEWAY=$(sudo -u vagrant /home/vagrant/.local/bin/pipx list | grep -o '/.*slurm-web-gateway')
-if [ -z "$SLURM_WEB_GATEWAY" ]; then
-    echo "❌ ERROR: slurm-web-gateway executable not found after pipx installation."
-    exit 1
-fi
-echo "✅ Found slurm-web-gateway at: $SLURM_WEB_GATEWAY"
 
 # Create basic configuration directory and files
 sudo mkdir -p /etc/slurm-web
@@ -98,10 +93,13 @@ echo "--- Verifying slurm-web installation ---"
 sleep 5
 if curl --silent --fail http://localhost:8081; then
     echo "✅ slurm-web is running."
+    echo "📝 Access slurm-web at: http://localhost:8081"
 else
     echo "❌ ERROR: slurm-web failed to start." >&2
-    # Show logs for debugging
-    journalctl -u slurm-web.service --no-pager -n 50
+    echo "--- Checking service status ---"
+    systemctl status slurm-web.service --no-pager -l || true
+    echo "--- Checking service logs ---"
+    journalctl -u slurm-web.service --no-pager -n 50 || true
     exit 1
 fi
 

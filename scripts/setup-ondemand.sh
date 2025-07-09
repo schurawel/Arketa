@@ -71,39 +71,28 @@ fi
 echo "--- Building Open OnDemand Docker image ---"
 
 echo "Building Open OnDemand image (this may take several minutes)..."
-if docker build -t ondemand:latest -f Dockerfile . ; then
-    echo "Open OnDemand image built successfully"
+# Check which Dockerfile to use (prefer demo, then dev, then example)
+if [ -f "Dockerfile.demo" ]; then
+    DOCKERFILE="Dockerfile.demo"
+elif [ -f "Dockerfile.dev" ]; then
+    DOCKERFILE="Dockerfile.dev"
+elif [ -f "Dockerfile.example" ]; then
+    DOCKERFILE="Dockerfile.example"
 else
-    echo "Failed to build Open OnDemand image. Trying fallback approach..."
-    # Use a simple Apache-based approach as fallback
-    cat > /tmp/Dockerfile.simple << 'SIMPLE_EOF'
-FROM ubuntu:22.04
+    echo "No suitable Dockerfile found in Open OnDemand repository"
+    exit 1
+fi
 
-# Install Apache and basic dependencies
-RUN apt-get update && apt-get install -y \
-    apache2 \
-    apache2-utils \
-    ruby \
-    ruby-dev \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Simple index page
-RUN echo '<h1>Open OnDemand Placeholder</h1><p>This is a placeholder for Open OnDemand.</p><p>Slurm cluster is running separately.</p>' > /var/www/html/index.html
-
-EXPOSE 80
-CMD ["apache2ctl", "-D", "FOREGROUND"]
-SIMPLE_EOF
-    docker build -t ondemand:latest -f /tmp/Dockerfile.simple /tmp/
+if [ -n "$DOCKERFILE" ] && docker build -t ondemand:latest -f "$DOCKERFILE" . ; then
+    echo "Open OnDemand image built successfully using $DOCKERFILE"
 else
-    echo "Open OnDemand image built successfully"
+    echo "Failed to build Open OnDemand image. Aborting."
+    exit 1
 fi
 
 # Create docker-compose.yml for Open OnDemand
 echo "--- Creating Docker Compose configuration ---"
 cat > /opt/ood/docker-compose.yml << 'EOF'
-version: '3.8'
-
 services:
   ondemand:
     image: ondemand:latest
@@ -157,17 +146,48 @@ docker-compose up -d
 
 # Wait for the container to be ready
 echo "--- Waiting for Open OnDemand to start ---"
-sleep 30
+echo "Container is starting up with systemd, this may take a few minutes..."
 
-# Health check for Open OnDemand
-echo "--- Verifying Open OnDemand installation ---"
-if curl --silent --fail http://localhost; then
+# Wait for systemd and services to initialize inside the container
+max_wait=180  # 3 minutes
+wait_time=0
+echo "Waiting for Open OnDemand services to initialize..."
+
+while [ $wait_time -lt $max_wait ]; do
+    echo "Checking Open OnDemand status... ($wait_time/$max_wait seconds)"
+    
+    # Check if HTTP service is responding
+    if curl --silent --fail --connect-timeout 5 http://localhost:8080 >/dev/null 2>&1; then
+        echo "✅ Open OnDemand is responding!"
+        break
+    fi
+    
+    # Show container status every 30 seconds
+    if [ $((wait_time % 30)) -eq 0 ]; then
+        echo "--- Container status at $wait_time seconds ---"
+        docker-compose ps
+        echo "--- Recent container logs ---"
+        docker-compose logs --tail=10 ondemand
+    fi
+    
+    sleep 10
+    wait_time=$((wait_time + 10))
+done
+
+# Final health check
+echo "--- Final verification of Open OnDemand ---"
+if curl --silent --fail http://localhost:8080; then
     echo "✅ Open OnDemand is running via Docker."
-    echo "📝 Access Open OnDemand at: http://localhost"
+    echo "📝 Access Open OnDemand at: http://localhost:8080"
 else
-    echo "❌ ERROR: Open OnDemand failed to start." >&2
-    echo "--- Checking container logs ---"
+    echo "❌ ERROR: Open OnDemand failed to start after $max_wait seconds." >&2
+    echo "--- Final container status ---"
+    docker-compose ps
+    echo "--- Full container logs ---"
     docker-compose logs ondemand
+    echo "--- Attempting to check services inside container ---"
+    docker-compose exec ondemand systemctl status httpd || true
+    docker-compose exec ondemand systemctl status ondemand-dex || true
     exit 1
 fi
 

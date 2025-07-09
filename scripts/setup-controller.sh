@@ -5,12 +5,6 @@ set -e
 
 echo "Setting up Slurm Controller Node..."
 
-# Verify base system is available
-if [ ! -f /etc/hpc-base-version ]; then
-    echo "ERROR: HPC base system not found. Run setup-base.sh first."
-    exit 1
-fi
-
 # Source the Slurm environment (should be available from base setup)
 if ! grep -q "/opt/slurm/bin" /etc/environment; then
     sed -i 's|PATH="\(.*\)"|PATH="/opt/slurm/bin:/opt/slurm/sbin:\1"|' /etc/environment

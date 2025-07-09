@@ -7,6 +7,15 @@ NODE_ID=$1
 
 echo "Setting up Slurm Compute Node ${NODE_ID}..."
 
+# Ensure SSH service is running and ready
+echo "Ensuring SSH service is ready..."
+systemctl enable ssh
+systemctl start ssh
+systemctl status ssh --no-pager || true
+
+# Wait a moment for network to be fully ready
+sleep 10
+
 # Source the Slurm environment (should be available from base setup)
 # Also ensure environment is available for all shell types
 if ! grep -q "/opt/slurm/bin" /etc/environment; then
@@ -31,9 +40,28 @@ fi
 
 # Wait for controller to be ready and shared directory to be available
 echo "Waiting for controller to be ready..."
-while [ ! -f /shared/munge.key ]; do
-    sleep 5
-    mount -a 2>/dev/null || true
+
+# Retry mounting the NFS share with backoff
+max_attempts=30
+attempt=1
+while [ $attempt -le $max_attempts ]; do
+    echo "Attempt $attempt/$max_attempts: Trying to mount NFS share..."
+    if mount -a 2>/dev/null && [ -f /shared/munge.key ]; then
+        echo "Successfully mounted NFS share and found munge.key"
+        break
+    fi
+    
+    if [ $attempt -eq $max_attempts ]; then
+        echo "ERROR: Failed to mount NFS share after $max_attempts attempts"
+        echo "Checking NFS status on controller..."
+        ping -c 3 slurm-controller || true
+        showmount -e slurm-controller || true
+        exit 1
+    fi
+    
+    echo "NFS mount failed, waiting 10 seconds before retry..."
+    sleep 10
+    attempt=$((attempt + 1))
 done
 
 # Setup Munge authentication with shared key

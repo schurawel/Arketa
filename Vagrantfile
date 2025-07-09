@@ -23,6 +23,9 @@ Vagrant.configure("2") do |config|
   # Use either base box or Ubuntu 18.04 LTS
   config.vm.box = BASE_BOX
 
+  # Disable the default /vagrant share to prevent syncing the entire project
+  config.vm.synced_folder ".", "/vagrant", disabled: true, rsync__exclude: [".git/", "*.o", "*.lo", "*.la", "*.box"]
+
   # Shared folder configuration
   config.vm.synced_folder "./scripts", "/home/vagrant/scripts", type: "rsync"
   config.vm.synced_folder "./sample-jobs", "/home/vagrant/sample-jobs", type: "rsync"
@@ -174,6 +177,18 @@ Vagrant.configure("2") do |config|
         lv.cpus = 2
       end
 
+      # Disable all synced folders for compute nodes
+      node.vm.synced_folder ".", "/vagrant", disabled: true
+      node.vm.synced_folder "./scripts", "/home/vagrant/scripts", disabled: true
+      node.vm.synced_folder "./sample-jobs", "/home/vagrant/sample-jobs", disabled: true
+      node.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", disabled: true
+      node.vm.synced_folder "./tmp", "/home/vagrant/tmp", disabled: true
+
+      # Upload scripts, sample-jobs, and slurm-src folders manually (no synced folders)
+      node.vm.provision "file", source: "./scripts", destination: "/home/vagrant/scripts"
+      node.vm.provision "file", source: "./sample-jobs", destination: "/home/vagrant/sample-jobs"
+      node.vm.provision "file", source: "./tmp/slurm", destination: "/home/vagrant/slurm-src"
+
       # Install and configure Slurm compute node
       node.vm.provision "shell", inline: <<-SHELL
         echo "⚙️ Setting up Compute Node #{i}..."
@@ -192,15 +207,14 @@ Vagrant.configure("2") do |config|
         apt-get update
         apt-get install -y nfs-common
 
-        
         # Mount shared directory
         mkdir -p /shared
         echo "slurm-controller:/shared /shared nfs defaults 0 0" >> /etc/fstab
         
         # Run compute node setup script
         /home/vagrant/scripts/setup-compute.sh
-        
-        echo "✅ Compute Node #{i} fully configured and ready"
+
+        echo "✅ Compute node #{i} setup complete."
       SHELL
     end
   end

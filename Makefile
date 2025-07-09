@@ -302,17 +302,6 @@ preflight: ## ✅ Run preflight checks for dependencies
 	@echo "$(BLUE)[INFO]$(NC) Running preflight checks..."
 	@$(PREFLIGHT_CHECK)
 
-setup-libvirt: ## 🔧 Install libvirt and required tools
-	@echo "$(BLUE)[INFO]$(NC) Installing libvirt, Vagrant, and required tools..."
-	@if ! command -v vagrant &> /dev/null; then \
-		echo "Vagrant not found. Please install it first."; \
-		exit 1; \
-	fi
-	@sudo apt-get update
-	@sudo apt-get install -y libvirt-daemon-system libvirt-clients qemu-kvm ebtables dnsmasq-base libguestfs-tools
-	@vagrant plugin install vagrant-libvirt
-	@echo "$(GREEN)[SUCCESS]$(NC) Libvirt setup is complete."
-
 build-vagrant: ## 🏗️ Build the vagrant-wrapper utility
 	@if [ -x "$(VAGRANT_WRAPPER)" ]; then \
 		echo "$(BLUE)[INFO]$(NC) vagrant-wrapper.sh is executable. Skipping build."; \

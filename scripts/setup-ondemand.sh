@@ -58,17 +58,25 @@ fi
 mkdir -p /opt/ood/config/clusters.d
 mkdir -p /opt/ood/data
 
+# Navigate to the source directory
+if [ -d "/home/vagrant/tmp/ondemand" ]; then
+  cd /home/vagrant/tmp/ondemand
+  echo "Changed directory to $(pwd)"
+else
+  echo "Error: Open OnDemand source directory not found at /home/vagrant/tmp/ondemand" >&2
+  exit 1
+fi
+
 # Build Open OnDemand Docker image from source
 echo "--- Building Open OnDemand Docker image ---"
-if [ -d "/tmp/ondemand" ]; then
-    cd /tmp/ondemand
-    echo "Building Open OnDemand image (this may take several minutes)..."
-    if docker build -t ondemand:latest -f Dockerfile . ; then
-        echo "Open OnDemand image built successfully"
-    else
-        echo "Failed to build Open OnDemand image. Trying fallback approach..."
-        # Use a simple Apache-based approach as fallback
-        cat > /tmp/Dockerfile.simple << 'SIMPLE_EOF'
+
+echo "Building Open OnDemand image (this may take several minutes)..."
+if docker build -t ondemand:latest -f Dockerfile . ; then
+    echo "Open OnDemand image built successfully"
+else
+    echo "Failed to build Open OnDemand image. Trying fallback approach..."
+    # Use a simple Apache-based approach as fallback
+    cat > /tmp/Dockerfile.simple << 'SIMPLE_EOF'
 FROM ubuntu:22.04
 
 # Install Apache and basic dependencies
@@ -86,19 +94,9 @@ RUN echo '<h1>Open OnDemand Placeholder</h1><p>This is a placeholder for Open On
 EXPOSE 80
 CMD ["apache2ctl", "-D", "FOREGROUND"]
 SIMPLE_EOF
-        docker build -t ondemand:latest -f /tmp/Dockerfile.simple /tmp/
-    fi
+    docker build -t ondemand:latest -f /tmp/Dockerfile.simple /tmp/
 else
-    echo "Open OnDemand source not found, creating a simple placeholder service..."
-    # Create a minimal placeholder
-    cat > /tmp/Dockerfile.placeholder << 'PLACEHOLDER_EOF'
-FROM nginx:alpine
-
-RUN echo '<h1>Open OnDemand Placeholder</h1><p>This is a placeholder for Open OnDemand.</p><p>Slurm cluster is running at the controller node.</p><p>You can access Slurm directly via SSH to the controller.</p>' > /usr/share/nginx/html/index.html
-
-EXPOSE 80
-PLACEHOLDER_EOF
-    docker build -t ondemand:latest -f /tmp/Dockerfile.placeholder /tmp/
+    echo "Open OnDemand image built successfully"
 fi
 
 # Create docker-compose.yml for Open OnDemand

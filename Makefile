@@ -103,27 +103,35 @@ cluster-full: setup-repos preflight build-vagrant ## 📦 Complete cluster setup
 ## 🏗️ Base Box Management
 
 build-base: setup-repos preflight build-vagrant ## 📦 Create base box with Slurm pre-compiled
-	@if $(VAGRANT_WRAPPER) box list | grep -q "slurm-base"; then \
-		echo "$(GREEN)[INFO]$(NC) Reusable Slurm base box already exists. Skipping build."; \
+	@if [ -f "boxes/slurm-base.box" ]; then \
+		echo "$(GREEN)[INFO]$(NC) Reusable Slurm base box file already exists. Skipping build."; \
+		if ! $(VAGRANT_WRAPPER) box list | grep -q "slurm-base"; then \
+			echo "$(BLUE)[INFO]$(NC) Adding box to Vagrant..."; \
+			$(VAGRANT_WRAPPER) box add --force --name slurm-base boxes/slurm-base.box; \
+		fi; \
 	else \
 		echo "$(YELLOW)[INFO]$(NC) Creating reusable Slurm base box... (This may take 10-15 minutes)"; \
+		mkdir -p boxes; \
 		$(MAKE) remove-base; \
 		SLURM_BUILD_BASE=true $(VAGRANT_WRAPPER) up base; \
 		$(VAGRANT_WRAPPER) halt base; \
-		$(VAGRANT_WRAPPER) package base --output slurm-base.box; \
-		$(VAGRANT_WRAPPER) box add --force --name slurm-base slurm-base.box; \
+		$(VAGRANT_WRAPPER) package base --output boxes/slurm-base.box; \
+		$(VAGRANT_WRAPPER) box add --force --name slurm-base boxes/slurm-base.box; \
 		$(VAGRANT_WRAPPER) destroy -f base; \
-		rm -f slurm-base.box; \
 		echo "$(GREEN)[SUCCESS]$(NC) Slurm base box created successfully."; \
 	fi
 
-remove-base: ## 🗑️ Remove the Slurm base box
-	@echo "$(YELLOW)[INFO]$(NC) Removing existing Slurm base box..."
+remove-base: ## 🗑️ Remove the Slurm base box and its file
+	@echo "$(YELLOW)[INFO]$(NC) Removing existing Slurm base box and file..."
 	@if $(VAGRANT_WRAPPER) box list | grep -q "slurm-base"; then \
 		$(VAGRANT_WRAPPER) box remove -f slurm-base; \
-		echo "$(GREEN)[SUCCESS]$(NC) Removed slurm-base box."; \
+		echo "$(GREEN)[SUCCESS]$(NC) Removed slurm-base box from Vagrant."; \
 	else \
-		echo "$(BLUE)[INFO]$(NC) No slurm-base box found to remove."; \
+		echo "$(BLUE)[INFO]$(NC) No slurm-base box found in Vagrant to remove."; \
+	fi
+	@if [ -f "boxes/slurm-base.box" ]; then \
+		rm -f boxes/slurm-base.box; \
+		echo "$(GREEN)[SUCCESS]$(NC) Removed boxes/slurm-base.box file."; \
 	fi
 	@# Also destroy the base VM if it exists
 	@if $(VAGRANT_WRAPPER) status base | grep -q "running"; then \
@@ -159,32 +167,39 @@ start: ## ▶️ Start all cluster VMs
 	@echo "$(GREEN)[INFO]$(NC) Starting all cluster VMs..."
 	@$(VAGRANT_WRAPPER) up --no-provision controller node1 node2
 
-clean-vms: ## 🧹 Destroy cluster VMs but keep base box
+clean: ## 🗑️ Clean up the cluster environment
 	@echo "$(YELLOW)[INFO]$(NC) Destroying cluster VMs (controller, node1, node2)..."
-	@$(VAGRANT_WRAPPER) destroy -f controller node1 node2
+	@$(VAGRANT_WRAPPER) destroy -f controller node1 node2 >/dev/null 2>&1 || true
 	@echo "$(GREEN)[SUCCESS]$(NC) Cluster VMs destroyed."
-
-clean: ## 🗑️ Destroy all VMs and remove the base box
-	@echo "$(RED)[DANGER]$(NC) This will destroy all VMs and the base box."
-	@read -p "Are you sure? [y/N] " -n 1 -r; \
-	echo; \
-	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
-		echo "Destroying all VMs..."; \
-		$(VAGRANT_WRAPPER) destroy -f; \
-		$(MAKE) remove-base; \
-		echo "Cleaning up repositories..."; \
-		rm -rf tmp; \
-		echo "$(GREEN)[SUCCESS]$(NC) Full cleanup complete."; \
-	else \
-		echo "Cleanup cancelled."; \
+	rm -rf .vagrant;
+	@if [ -f "boxes/slurm-base.box" ]; then \
+		echo; \
+		printf "$(YELLOW)A reusable base box file was found. Do you want to delete it? [y/N] $(NC)"; \
+		read -r reply; \
+		case "$$reply" in \
+			[Yy]*) \
+				$(MAKE) remove-base; \
+				;; \
+			*) \
+				echo "$(BLUE)INFO:$(NC) Base box preserved."; \
+				;; \
+		esac; \
 	fi
-
-force-clean: ## 💥 Force destroy all VMs and data without confirmation
-	@echo "$(RED)[DANGER]$(NC) Forcibly destroying all VMs, base box, and repositories..."
-	@$(VAGRANT_WRAPPER) destroy -f
-	@$(MAKE) remove-base
-	@rm -rf tmp
-	@echo "$(GREEN)[SUCCESS]$(NC) Forced cleanup complete."
+	@echo
+	@printf "$(YELLOW)The 'tmp' directory contains cloned source code. Do you want to delete it? [y/N] $(NC)"; \
+	read -r reply; \
+	case "$$reply" in \
+		[Yy]*) \
+			echo "Deleting 'tmp' directory..."; \
+			rm -rf tmp; \
+			echo "$(GREEN)[SUCCESS]$(NC) 'tmp' directory deleted."; \
+			;; \
+		*) \
+			echo "$(BLUE)INFO:$(NC) 'tmp' directory preserved."; \
+			;; \
+	esac
+	@echo
+	@echo "$(GREEN)Cleanup complete.$(NC)"
 
 ## 🌐 Web Interfaces
 
@@ -288,13 +303,13 @@ preflight: ## ✅ Run preflight checks for dependencies
 	@$(PREFLIGHT_CHECK)
 
 setup-libvirt: ## 🔧 Install libvirt and required tools
-	@echo "$(BLUE)[INFO]$(NC) Installing libvirt, Vagrant, and required plugins..."
+	@echo "$(BLUE)[INFO]$(NC) Installing libvirt, Vagrant, and required tools..."
 	@if ! command -v vagrant &> /dev/null; then \
 		echo "Vagrant not found. Please install it first."; \
 		exit 1; \
 	fi
 	@sudo apt-get update
-	@sudo apt-get install -y libvirt-daemon-system libvirt-clients qemu-kvm ebtables dnsmasq-base
+	@sudo apt-get install -y libvirt-daemon-system libvirt-clients qemu-kvm ebtables dnsmasq-base libguestfs-tools
 	@vagrant plugin install vagrant-libvirt
 	@echo "$(GREEN)[SUCCESS]$(NC) Libvirt setup is complete."
 

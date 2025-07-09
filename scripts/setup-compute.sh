@@ -7,12 +7,6 @@ NODE_ID=$1
 
 echo "Setting up Slurm Compute Node ${NODE_ID}..."
 
-# Verify base system is available
-if [ ! -f /etc/hpc-base-version ]; then
-    echo "ERROR: HPC base system not found. Run setup-base.sh first."
-    exit 1
-fi
-
 # Source the Slurm environment (should be available from base setup)
 # Also ensure environment is available for all shell types
 if ! grep -q "/opt/slurm/bin" /etc/environment; then

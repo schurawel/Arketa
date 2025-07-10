@@ -1,149 +1,93 @@
 #!/bin/bash
-# setup-slurm-web.sh - Simplified slurm-web setup script
-# Installs slurm-web with minimal configuration in the correct location
-
+# setup-slurm-web.sh - Automated Slurm-web setup for Ubuntu 24.04 LTS (Noble Numbat)
 set -e
 
-echo "🌐 Setting up slurm-web - Minimal Configuration"
+echo "🌐 Setting up slurm-web - Official Quickstart Configuration"
 
-# Install dependencies and development tools
-echo "📦 Installing dependencies..."
-apt-get update
-apt-get install -y git python3 python3-pip python3-venv python3-dev build-essential python3-setuptools python3-wheel
+# 1. Add Rackslab APT repository and key for Ubuntu 24.04
+echo "🔑 Adding Rackslab APT repository..."
+sudo apt-get update
+sudo apt-get install -y curl gpg
+curl -sS https://pkgs.rackslab.io/keyring.asc | gpg --dearmor | sudo tee /usr/share/keyrings/rackslab.gpg > /dev/null
 
-# Create the exact directory structure slurm-web is looking for
-echo "📂 Creating configuration directory..."
-mkdir -p /usr/share/slurm-web/conf
-
-# Create the gateway.yml file exactly where slurm-web is looking for it
-echo "📝 Creating minimal configuration in the CORRECT location..."
-cat > /usr/share/slurm-web/conf/gateway.yml << 'EOF'
----
-service:
-  interface: 0.0.0.0
-  port: 8081
-  debug: false
-
-authentication:
-  enabled: false
-
-jwt:
-  audience: slurm-web
-  algorithm: HS256
-  key: changeme-insecure-default-key
-
-clusters:
-  - name: default
-    description: PrimedSLURM Cluster
-    controller: localhost
-    authentication: none
+cat <<EOF | sudo tee /etc/apt/sources.list.d/rackslab.sources
+Types: deb
+URIs: https://pkgs.rackslab.io/deb
+Suites: ubuntu24.04
+Components: main slurmweb-5
+Architectures: amd64
+Signed-By: /usr/share/keyrings/rackslab.gpg
 EOF
 
-# Install slurm-web from existing source code
-echo "🔧 Installing slurm-web from existing source code..."
+sudo apt-get update
 
-# Check if the source code exists
-if [ ! -d "/home/vagrant/tmp/slurm-web" ]; then
-  echo "❌ Source code not found at /home/vagrant/tmp/slurm-web"
-  echo "Expected to find slurm-web source code in this location"
+# 2. Install Slurm-web agent and gateway
+echo "📦 Installing slurm-web agent and gateway..."
+sudo apt-get install -y slurm-web-agent slurm-web-gateway
+
+# 3. Initial configuration
+echo "🛠️ Creating initial configuration files..."
+sudo mkdir -p /etc/slurm-web
+cat <<EOF | sudo tee /etc/slurm-web/agent.ini
+[service]
+cluster=primedslurm
+EOF
+
+cat <<EOF | sudo tee /etc/slurm-web/gateway.ini
+[agents]
+url=http://localhost:5012
+EOF
+
+# 4. Generate JWT signing key for Slurm-web
+echo "🔑 Generating JWT signing key for Slurm-web..."
+sudo /usr/libexec/slurm-web/slurm-web-gen-jwt-key
+
+# 5. Ensure Slurm JWT signing key exists for slurmrestd
+if [ ! -f /var/spool/slurm/jwt_hs256.key ]; then
+  echo "🔑 Slurm JWT key not found at /var/spool/slurm/jwt_hs256.key. Generating it..."
+  
+  # Ensure the directory exists with proper permissions
+  sudo mkdir -p /var/spool/slurm
+  sudo chown slurm:slurm /var/spool/slurm
+  sudo chmod 700 /var/spool/slurm
+  
+  # Use direct path to Slurm libraries
+  SLURM_LIB_PATH="/opt/slurm/lib"
+  
+  # Create the key directly with openssl
+  echo "🔑 Creating JWT key with openssl..."
+  sudo -u slurm bash -c 'umask 077; openssl rand -base64 32 > /var/spool/slurm/jwt_hs256.key'
+  
+  # Verify the key was created
+  if [ -f /var/spool/slurm/jwt_hs256.key ]; then
+    echo "✅ Successfully created JWT key"
+  else
+    echo "❌ Failed to create JWT key as slurm user - trying with sudo"
+    sudo bash -c 'umask 077; openssl rand -base64 32 > /var/spool/slurm/jwt_hs256.key'
+    sudo chown slurm:slurm /var/spool/slurm/jwt_hs256.key
+    sudo chmod 600 /var/spool/slurm/jwt_hs256.key
+  fi
+fi
+
+# 5. Copy Slurm JWT signing key for slurmrestd
+echo "📂 Copying Slurm JWT signing key for slurmrestd..."
+if [ -f /var/spool/slurm/jwt_hs256.key ]; then
+  sudo cp /var/spool/slurm/jwt_hs256.key /var/lib/slurm-web/slurmrestd.key
+  sudo chown slurm-web:slurm-web /var/lib/slurm-web/slurmrestd.key
+  sudo chmod 400 /var/lib/slurm-web/slurmrestd.key
+else
+  echo "❌ Slurm JWT key could not be generated at /var/spool/slurm/jwt_hs256.key. Please check your Slurm installation and permissions."
   exit 1
 fi
 
-# Change to the source directory
-cd /home/vagrant/tmp/slurm-web
+# 6. Enable and start services
+echo "🚀 Enabling and starting slurm-web services..."
+sudo systemctl enable --now slurm-web-agent.service
+sudo systemctl enable --now slurm-web-gateway.service
 
-# Create a setup.py file to support editable installs
-echo "📝 Creating setup.py file to support editable installs..."
-cat > setup.py << 'EOF'
-from setuptools import setup, find_packages
-
-setup(
-    name="slurm-web",
-    version="0.1.0",
-    packages=find_packages(),
-    install_requires=[
-        "flask",
-        "pyyaml",
-        "pyjwt",
-        "requests",
-    ],
-    entry_points={
-        'console_scripts': [
-            'slurm-web-gateway=slurmweb.gateway:main',
-        ],
-    },
-)
-EOF
-
-# Install using pip in development mode with our custom setup.py
-echo "📦 Installing from source in development mode..."
-pip3 install -e .
-
-# Ensure binary is in PATH for vagrant user
-echo "🔗 Setting up PATH for slurm-web binaries..."
-if ! grep -q "/home/vagrant/.local/bin" /home/vagrant/.bashrc; then
-  echo 'export PATH="/home/vagrant/.local/bin:$PATH"' >> /home/vagrant/.bashrc
-fi
-
-# Make sure the binary exists
-if [ ! -f "/home/vagrant/.local/bin/slurm-web-gateway" ]; then
-  # Try alternative installation location
-  if [ -f "/usr/local/bin/slurm-web-gateway" ]; then
-    echo "📍 Found slurm-web-gateway in /usr/local/bin/"
-    SLURM_WEB_BINARY="/usr/local/bin/slurm-web-gateway"
-  else
-    echo "🔍 Searching for slurm-web-gateway binary..."
-    find /home/vagrant /usr/local /usr -name "slurm-web-gateway" 2>/dev/null || true
-    # Use which to find it in PATH
-    SLURM_WEB_BINARY=$(which slurm-web-gateway 2>/dev/null || echo "/home/vagrant/.local/bin/slurm-web-gateway")
-  fi
-else
-  SLURM_WEB_BINARY="/home/vagrant/.local/bin/slurm-web-gateway"
-fi
-
-echo "🎯 Using slurm-web binary: $SLURM_WEB_BINARY"
-
-# Verify installation
-echo "🔍 Verifying slurm-web installation..."
-echo "Source directory contents:"
-ls -la /home/vagrant/tmp/slurm-web/
-
-echo "Python packages installed:"
-pip3 list | grep -i slurm || echo "No slurm packages found in pip list"
-
-echo "Binary locations:"
-find /home/vagrant /usr/local /usr -name "*slurm*web*" 2>/dev/null || echo "No slurm-web binaries found"
-
-# Test if we can import slurm-web
-echo "Testing Python import:"
-python3 -c "import slurmweb; print('slurm-web imported successfully')" 2>/dev/null || echo "Could not import slurmweb module"
-
-# Create systemd service file - using the detected binary location
-echo "⚙️ Creating systemd service..."
-cat > /etc/systemd/system/slurm-web.service << EOF
-[Unit]
-Description=Slurm-Web - A web interface for Slurm
-After=network.target
-
-[Service]
-Type=simple
-User=vagrant
-Group=vagrant
-ExecStart=$SLURM_WEB_BINARY
-Environment="PATH=/home/vagrant/.local/bin:/usr/local/bin:/usr/bin:/bin"
-WorkingDirectory=/home/vagrant/tmp/slurm-web
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable and start the service
-echo "🚀 Starting slurm-web service..."
-systemctl daemon-reload
-systemctl enable slurm-web.service
-systemctl restart slurm-web.service
+# 7. Print access info
+echo "✅ Slurm-web setup complete!"
+echo "🌐 Access Slurm-web at: http://localhost:5011"
 
 # Health check
 echo "🔍 Waiting for slurm-web to initialize..."
@@ -154,15 +98,15 @@ while [ $wait_time -lt $max_wait ]; do
   echo "Checking slurm-web status... ($wait_time/$max_wait seconds)"
   
   # Check if service is active
-  if systemctl is-active --quiet slurm-web.service; then
+  if systemctl is-active --quiet slurm-web-gateway.service; then
     echo "✅ Service is active"
     
     # Check if port is responding
-    if curl --silent --fail --max-time 5 http://localhost:8081/ >/dev/null 2>&1; then
-      echo "✅ slurm-web is responding on port 8081!"
+    if curl --silent --fail --max-time 5 http://localhost:5011/ >/dev/null 2>&1; then
+      echo "✅ slurm-web is responding on port 5011!"
       break
     else
-      echo "⏳ Service is active but not responding on port 8081 yet..."
+      echo "⏳ Service is active but not responding on port 5011 yet..."
     fi
   else
     echo "⏳ Service is not active yet..."
@@ -171,13 +115,13 @@ while [ $wait_time -lt $max_wait ]; do
   # Show detailed status every 30 seconds
   if [ $((wait_time % 30)) -eq 0 ]; then
     echo "--- Service status at $wait_time seconds ---"
-    systemctl status slurm-web.service --no-pager || true
+    systemctl status slurm-web-gateway.service --no-pager || true
     
     echo "--- Recent logs ---"
-    journalctl -u slurm-web.service --no-pager --lines=10 || true
+    journalctl -u slurm-web-gateway.service --no-pager --lines=10 || true
     
     echo "--- Port status ---"
-    netstat -tlnp | grep 8081 || echo "No process listening on port 8081"
+    netstat -tlnp | grep 5011 || echo "No process listening on port 5011"
     
     echo "--- Process status ---"
     ps aux | grep slurm-web-gateway | grep -v grep || echo "No slurm-web-gateway process found"
@@ -191,15 +135,11 @@ done
 if [ $wait_time -ge $max_wait ]; then
   echo "❌ slurm-web failed to start within $max_wait seconds"
   echo "--- Final service status ---"
-  systemctl status slurm-web.service --no-pager -l
+  systemctl status slurm-web-gateway.service --no-pager -l
   echo "--- Complete logs ---"
-  journalctl -u slurm-web.service --no-pager
+  journalctl -u slurm-web-gateway.service --no-pager
   exit 1
 else
   echo "✅ slurm-web setup complete!"
-  echo "🌐 Access slurm-web at: http://localhost:8081"
-  
-  # Add port forwarding info
-  echo "📋 If using Vagrant, remember to forward port 8081 to access from host machine"
-  echo "   Example: config.vm.network 'forwarded_port', guest: 8081, host: 8081"
+  echo "🌐 Access slurm-web at: http://localhost:5011"
 fi

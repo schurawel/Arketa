@@ -19,16 +19,32 @@ end
 
 BASE_BOX = get_base_box()
 
+# Helper function to clean stale locks
+def clean_stale_locks(vm_name)
+  # Find the lock file - specific to libvirt provider
+  lock_file = File.join(ENV['HOME'], '.vagrant.d', 'locks', 'machine', BASE_BOX, 'libvirt', vm_name)
+  if File.exist?(lock_file)
+    puts "Found stale lock for #{vm_name}. Removing..."
+    File.delete(lock_file)
+    puts "Lock removed for #{vm_name}."
+  end
+end
+
 Vagrant.configure("2") do |config|
   # Use either base box or Ubuntu 18.04 LTS
   config.vm.box = BASE_BOX
 
+  # Add trigger to clean stale locks before VM operations
+  config.trigger.before :up do |trigger|
+    trigger.info = "Checking for stale VM locks..."
+    trigger.ruby do |env, machine|
+      clean_stale_locks(machine.name.to_s)
+    end
+  end
+
   # Disable the default /vagrant share to prevent syncing the entire project
   config.vm.synced_folder ".", "/vagrant", disabled: true, rsync__exclude: [".git/", "*.o", "*.lo", "*.la", "*.box"]
   
-  # Create a private network for cluster communication
-  # config.vm.network "private_network", type: "dhcp"
-
   # Global VM settings for libvirt provider
   config.vm.provider "libvirt" do |lv|
     lv.driver = "kvm"
@@ -41,9 +57,14 @@ Vagrant.configure("2") do |config|
   end
 
   # SSH configuration to improve reliability
-  config.ssh.connect_timeout = 60
+  config.ssh.connect_timeout = 300 
   config.ssh.shell = "bash -l"
   config.ssh.keep_alive = true
+  config.ssh.insert_key = false  # Use the insecure key to avoid key insertion timing issues
+  config.ssh.forward_agent = false  # Disable agent forwarding for simpler connections
+  
+  # Global VM boot timeout
+  config.vm.boot_timeout = 600  # 10 minutes should be plenty for boot
 
   # Base VM for creating Slurm base box (only when SLURM_BUILD_BASE=true)
   config.vm.define "base", autostart: false do |base|
@@ -177,18 +198,8 @@ Vagrant.configure("2") do |config|
   # Slurm Compute Nodes (slurmd)
   (1..2).each do |i|
     config.vm.define "node#{i}" do |node|
-      node.vm.hostname = "node#{i}"
+    
       node.vm.network "private_network", ip: "192.168.121.#{10 + i}"
-      
-      node.vm.provider "libvirt" do |lv|
-        lv.memory = 3072
-        lv.cpus = 2
-        
-        # Give libvirt more time to initialize the VM
-        lv.boot_command = ["<wait>"]
-        # Explicitly set maximum retries for a clean boot
-        lv.retries = 30
-      end
 
       # Disable ALL global synced folders for compute nodes to prevent rsync SSH errors
       node.vm.synced_folder "./scripts", "/home/vagrant/scripts", disabled: true
@@ -196,19 +207,14 @@ Vagrant.configure("2") do |config|
       node.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", disabled: true
       node.vm.synced_folder "./tmp", "/home/vagrant/tmp", disabled: true
 
-      # Enhanced SSH settings specifically for compute nodes
-      node.ssh.username = "vagrant"
-      node.ssh.insert_key = true
-      node.ssh.keep_alive = true
-      node.ssh.connect_timeout = 600  # 10 minutes timeout for SSH connection
-      node.ssh.max_tries = 40         # Increased number of connection attempts
-      node.ssh.verify_host_key = :never
-      # Add 5 second delay between SSH connection attempts
-      node.ssh.connect_timeout_retry_min = 5
+      node.vm.provider "libvirt" do |lv|
+        lv.memory = 3072
+        lv.cpus = 2
+      end
 
-      # Dramatically increase boot timeout to give VM more time to initialize network
-      node.vm.boot_timeout = 1800     # 30 minutes
-
+      # Increase SSH boot timeout for slow VM/network
+      node.vm.boot_timeout = 300  # 5 minutes for compute nodes
+      
       # Move hostname setting to a separate provision step after SSH is ready
       node.vm.provision "shell", inline: "hostnamectl set-hostname node#{i}"
 

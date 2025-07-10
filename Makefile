@@ -213,13 +213,13 @@ clean: ## 🗑️ Clean up the cluster environment
 
 ondemand: ## 🌐 Start Open OnDemand service
 	@echo "$(BLUE)[INFO]$(NC) Ensuring Open OnDemand is set up..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "/home/vagrant/scripts/setup-ondemand.sh"
-	@echo "$(GREEN)[SUCCESS]$(NC) Open OnDemand is running. Access at http://localhost:8080"
+	@echo "$(GREEN)[SUCCESS]$(NC) Open OnDemand is running. Access at http://localhost/"
+	@xdg-open http://localhost/ 2>/dev/null || echo "Open http://localhost/ in your browser."
 
 slurm-web: ## 🌐 Start slurm-web service
 	@echo "$(BLUE)[INFO]$(NC) Ensuring slurm-web is set up..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "/home/vagrant/scripts/setup-slurm-web.sh"
-	@echo "$(GREEN)[SUCCESS]$(NC) slurm-web is running. Access at http://localhost:8081"
+	@echo "$(GREEN)[SUCCESS]$(NC) slurm-web is running. Access at http://localhost:5011"
+	@xdg-open http://localhost:5011 2>/dev/null || echo "Open http://localhost:5011 in your browser."
 
 ## 📜 Job Testing Targets
 

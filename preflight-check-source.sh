@@ -158,6 +158,13 @@ if [[ $ERRORS -eq 0 ]]; then
     echo "  3. Check health: ./cluster-manager.sh health"
     echo "  4. Connect: ./cluster-manager.sh connect"
 else
-    print_error "$ERRORS error(s) found. Please fix before proceeding."
+    print_error "$ERRORS checks failed. Please resolve the issues above."
     exit 1
 fi
+
+# Create provision tarball for compute nodes
+print_status "Creating provision tarball for compute nodes..."
+tar -czf ./compute-provision-files.tar.gz ./scripts ./sample-jobs && echo '✅ Tarball created: ./compute-provision-files.tar.gz'
+
+echo
+print_success "Pre-flight check complete."

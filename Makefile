@@ -54,10 +54,6 @@ help: ## 📋 Show this help message
 	@echo "  make cluster          # Deploy fast cluster (~2-3 min)"
 	@echo "  make test-and-wait    # Test with full monitoring"
 	@echo ""
-	@echo "$(YELLOW)🔄 Development Workflow:$(NC)"
-	@echo "  make cluster-full     # Full build from scratch"
-	@echo "  make clean-vms        # Clean VMs but keep base box (fast cleanup)"
-	@echo ""
 	@echo "$(YELLOW)🏗️ Bare Metal Workflow:$(NC)"
 	@echo "  make metal            # Create custom Ubuntu ISO (independent)"
 	@echo "  make sim-metal        # Test with QEMU simulation"
@@ -65,7 +61,7 @@ help: ## 📋 Show this help message
 	@echo "  make metal-clean      # Clean up ISO workspace"
 	@echo "  make clean            # Clean up completely"
 
-cluster: setup-repos preflight build-base ## 🚀 Complete cluster setup using base box (recommended)
+cluster: clean setup-repos preflight build-base ## 🚀 Complete cluster setup using base box (recommended)
 	@echo "$(GREEN)[INFO]$(NC) Starting cluster deployment..."
 	@echo "$(BLUE)[INFO]$(NC) Base box check complete. Proceeding with cluster setup..."
 	@echo "$(BLUE)[STEP 1/3]$(NC) Starting controller node..."
@@ -171,7 +167,19 @@ clean: ## 🗑️ Clean up the cluster environment
 	@echo "$(YELLOW)[INFO]$(NC) Destroying cluster VMs (controller, node1, node2)..."
 	@$(VAGRANT_WRAPPER) destroy -f controller node1 node2 >/dev/null 2>&1 || true
 	@echo "$(GREEN)[SUCCESS]$(NC) Cluster VMs destroyed."
-	rm -rf .vagrant;
+	@echo "$(YELLOW)[INFO]$(NC) Cleaning up leftover libvirt domains and volumes..."
+	@for domain in $$(virsh list --all --name | grep PrimedSLURM); do \
+		echo "Removing domain: $$domain"; \
+		virsh destroy $$domain >/dev/null 2>&1 || true; \
+		virsh undefine $$domain --remove-all-storage >/dev/null 2>&1 || true; \
+	done
+	@echo "$(YELLOW)[INFO]$(NC) Cleaning up orphaned libvirt volumes..."
+	@for volume in $$(virsh vol-list default 2>/dev/null | grep PrimedSLURM | awk '{print $$1}'); do \
+		echo "Removing volume: $$volume"; \
+		virsh vol-delete $$volume default >/dev/null 2>&1 || true; \
+	done
+	@echo "$(GREEN)[SUCCESS]$(NC) Libvirt domains and volumes cleaned up."
+	@rm -rf .vagrant;
 	@if [ -f "boxes/slurm-base.box" ]; then \
 		echo; \
 		printf "$(YELLOW)A reusable base box file was found. Do you want to delete it? [y/N] $(NC)"; \

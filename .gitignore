@@ -81,3 +81,4 @@ __pycache__/
 test-output/
 test-results/
 *.test
+compute-provision-files.tar.gz

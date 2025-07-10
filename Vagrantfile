@@ -25,12 +25,6 @@ Vagrant.configure("2") do |config|
 
   # Disable the default /vagrant share to prevent syncing the entire project
   config.vm.synced_folder ".", "/vagrant", disabled: true, rsync__exclude: [".git/", "*.o", "*.lo", "*.la", "*.box"]
-
-  # Shared folder configuration
-  config.vm.synced_folder "./scripts", "/home/vagrant/scripts", type: "rsync"
-  config.vm.synced_folder "./sample-jobs", "/home/vagrant/sample-jobs", type: "rsync"
-  config.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", type: "rsync", rsync__exclude: [".git/", "*.o", "*.lo", "*.la"]
-  config.vm.synced_folder "./tmp", "/home/vagrant/tmp", type: "rsync", rsync__exclude: ["*.o", "*.lo", "*.la", "node_modules/", "*.pyc", "__pycache__/"]
   
   # Create a private network for cluster communication
   # config.vm.network "private_network", type: "dhcp"
@@ -45,6 +39,11 @@ Vagrant.configure("2") do |config|
     lv.graphics_type = "none"
     lv.management_network_name = "vagrant-libvirt"
   end
+
+  # SSH configuration to improve reliability
+  config.ssh.connect_timeout = 60
+  config.ssh.shell = "bash -l"
+  config.ssh.keep_alive = true
 
   # Base VM for creating Slurm base box (only when SLURM_BUILD_BASE=true)
   config.vm.define "base", autostart: false do |base|
@@ -89,6 +88,15 @@ Vagrant.configure("2") do |config|
     # Port forwarding for web interfaces
     controller.vm.network "forwarded_port", guest: 80, host: 8080
     controller.vm.network "forwarded_port", guest: 8081, host: 8081
+    
+    # Synced folders for controller
+    controller.vm.synced_folder "./scripts", "/home/vagrant/scripts", type: "rsync"
+    controller.vm.synced_folder "./sample-jobs", "/home/vagrant/sample-jobs", type: "rsync"
+    controller.vm.synced_folder "./tmp", "/home/vagrant/tmp", type: "rsync", rsync__exclude: ["*.o", "*.lo", "*.la", "node_modules/", "*.pyc", "__pycache__/"]
+    
+    # Disable only slurm-src for controller since Slurm is pre-installed in base image
+    # Keep tmp folder enabled for ondemand and slurm-web repos
+    controller.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", disabled: true
     
     controller.vm.provider "libvirt" do |lv|
       lv.memory = 3072
@@ -173,27 +181,62 @@ Vagrant.configure("2") do |config|
       node.vm.network "private_network", ip: "192.168.121.#{10 + i}"
       
       node.vm.provider "libvirt" do |lv|
-        lv.memory = 2048
+        lv.memory = 3072
         lv.cpus = 2
+        
+        # Give libvirt more time to initialize the VM
+        lv.boot_command = ["<wait>"]
+        # Explicitly set maximum retries for a clean boot
+        lv.retries = 30
       end
 
-      # Disable all synced folders for compute nodes
-      node.vm.synced_folder ".", "/vagrant", disabled: true
+      # Disable ALL global synced folders for compute nodes to prevent rsync SSH errors
       node.vm.synced_folder "./scripts", "/home/vagrant/scripts", disabled: true
       node.vm.synced_folder "./sample-jobs", "/home/vagrant/sample-jobs", disabled: true
       node.vm.synced_folder "./tmp/slurm", "/home/vagrant/slurm-src", disabled: true
       node.vm.synced_folder "./tmp", "/home/vagrant/tmp", disabled: true
 
-      # Upload scripts, sample-jobs, and slurm-src folders manually (no synced folders)
-      node.vm.provision "file", source: "./scripts", destination: "/home/vagrant/scripts"
-      node.vm.provision "file", source: "./sample-jobs", destination: "/home/vagrant/sample-jobs"
-      node.vm.provision "file", source: "./tmp/slurm", destination: "/home/vagrant/slurm-src"
+      # Enhanced SSH settings specifically for compute nodes
+      node.ssh.username = "vagrant"
+      node.ssh.insert_key = true
+      node.ssh.keep_alive = true
+      node.ssh.connect_timeout = 600  # 10 minutes timeout for SSH connection
+      node.ssh.max_tries = 40         # Increased number of connection attempts
+      node.ssh.verify_host_key = :never
+      # Add 5 second delay between SSH connection attempts
+      node.ssh.connect_timeout_retry_min = 5
+
+      # Dramatically increase boot timeout to give VM more time to initialize network
+      node.vm.boot_timeout = 1800     # 30 minutes
+
+      # Move hostname setting to a separate provision step after SSH is ready
+      node.vm.provision "shell", inline: "hostnamectl set-hostname node#{i}"
+
+      # Use file provisioner with tarball 
+      node.vm.provision "file", source: "./compute-provision-files.tar.gz", destination: "/tmp/compute-provision-files.tar.gz"
+
+      # Verify file transfer was successful
+      node.vm.provision "shell", inline: <<-SHELL
+        echo "🔍 Verifying file transfer was successful..."
+        if [ -f "/tmp/compute-provision-files.tar.gz" ]; then
+          echo "✅ File transfer successful"
+          ls -la /tmp/compute-provision-files.tar.gz
+        else
+          echo "❌ File transfer failed - retrying with alternative method"
+          exit 1
+        fi
+      SHELL
 
       # Install and configure Slurm compute node
       node.vm.provision "shell", inline: <<-SHELL
         echo "⚙️ Setting up Compute Node #{i}..."
         echo "📦 Using base box: #{BASE_BOX}"
-
+        
+        # Extract the provisioning files
+        echo "📁 Extracting provisioning files..."
+        tar -xzf /tmp/compute-provision-files.tar.gz -C /home/vagrant/
+        rm /tmp/compute-provision-files.tar.gz
+        
         # Make scripts executable
         chmod +x /home/vagrant/scripts/*.sh
 
@@ -211,8 +254,8 @@ Vagrant.configure("2") do |config|
         mkdir -p /shared
         echo "slurm-controller:/shared /shared nfs defaults 0 0" >> /etc/fstab
         
-        # Run compute node setup script
-        /home/vagrant/scripts/setup-compute.sh
+        # Run compute node setup
+        /home/vagrant/scripts/setup-compute.sh #{i}
 
         echo "✅ Compute node #{i} setup complete."
       SHELL

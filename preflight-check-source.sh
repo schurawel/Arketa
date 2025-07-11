@@ -168,3 +168,16 @@ tar -czf ./compute-provision-files.tar.gz ./scripts ./sample-jobs && echo '✅ T
 
 echo
 print_success "Pre-flight check complete."
+
+# Preflight check for dependencies
+
+# Check for dependencies in one command
+echo "Checking for required dependencies..."
+missing_deps=()
+
+# Check for basic commands
+for cmd in git ssh vagrant virsh qemu-img rsync; do
+    if ! command -v $cmd &>/dev/null; then
+        missing_deps+=($cmd)
+    fi
+done

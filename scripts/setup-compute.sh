@@ -7,6 +7,28 @@ NODE_ID=$1
 
 echo "Setting up Slurm Compute Node ${NODE_ID}..."
 
+# Add host entries (moved from Vagrantfile)
+grep -q "slurm-controller" /etc/hosts || echo "192.168.121.10 slurm-controller controller" >> /etc/hosts
+grep -q "node1" /etc/hosts || echo "192.168.121.11 node1" >> /etc/hosts
+grep -q "node2" /etc/hosts || echo "192.168.121.12 node2" >> /etc/hosts
+
+# Set hostname
+hostnamectl set-hostname node${NODE_ID}
+
+# Install NFS client and setup shared directory (moved from Vagrantfile)
+echo "Installing NFS client and setting up shared directory..."
+apt-get update
+apt-get install -y nfs-common
+
+# Mount shared directory and setup fstab
+mkdir -p /shared
+# Add mount to fstab for persistence if not already there
+grep -q "slurm-controller:/shared" /etc/fstab || echo "slurm-controller:/shared /shared nfs defaults 0 0" >> /etc/fstab
+
+# Attempt to mount the shared directory
+echo "Mounting controller:/shared to /shared..."
+mount -t nfs slurm-controller:/shared /shared || echo "⚠️ NFS mount failed, will try later"
+
 # Ensure SSH service is running and ready
 echo "Ensuring SSH service is ready..."
 systemctl enable ssh

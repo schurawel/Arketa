@@ -30,6 +30,7 @@ iso-workspace/.squashfs_filename
 *.monitor
 *.iso
 *.sif
+*.img
 
 # Build and log files
 *.log

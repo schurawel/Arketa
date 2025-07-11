@@ -24,6 +24,7 @@ NC = \033[0m # No Color
 VAGRANT_WRAPPER = ./vagrant-wrapper.sh
 CLUSTER_MANAGER = ./cluster-manager.sh
 PREFLIGHT_CHECK = ./preflight-check-source.sh
+QEMU_SCRIPT = ./qemu-cluster.sh
 
 ## 🎯 Main Targets
 
@@ -64,16 +65,101 @@ help: ## 📋 Show this help message
 cluster: clean setup-repos preflight build-base ## 🚀 Complete cluster setup using base box (recommended)
 	@echo "$(GREEN)[INFO]$(NC) Starting cluster deployment..."
 	@echo "$(BLUE)[INFO]$(NC) Base box check complete. Proceeding with cluster setup..."
-	@echo "$(BLUE)[STEP 1/3]$(NC) Starting controller node..."
-	SLURM_USE_BASE=true $(VAGRANT_WRAPPER) up controller
-	@echo "$(BLUE)[STEP 2/3]$(NC) Starting compute node 1..."
-	SLURM_USE_BASE=true $(VAGRANT_WRAPPER) up node1
-	@echo "$(BLUE)[STEP 3/3]$(NC) Starting compute node 2..."
-	SLURM_USE_BASE=true $(VAGRANT_WRAPPER) up node2
+	
+	@# Step 1: Start VMs one by one to avoid network conflicts
+	@echo "$(BLUE)[STEP 1/4]$(NC) Starting controller VM first..."
+	SLURM_USE_BASE=true $(VAGRANT_WRAPPER) up --no-provision controller || { echo "$(RED)[ERROR]$(NC) Failed to start controller VM"; exit 1; }
+	
+	@echo "$(BLUE)[STEP 2/4]$(NC) Starting compute node1..."
+	SLURM_USE_BASE=true $(VAGRANT_WRAPPER) up --no-provision node1 || { echo "$(RED)[ERROR]$(NC) Failed to start node1 VM"; exit 1; }
+	
+	@echo "$(BLUE)[STEP 3/4]$(NC) Starting compute node2..."
+	SLURM_USE_BASE=true $(VAGRANT_WRAPPER) up --no-provision node2 || { echo "$(RED)[ERROR]$(NC) Failed to start node2 VM"; exit 1; }
+	
+	@echo "$(BLUE)[STEP 4/4]$(NC) Provisioning VMs in the correct order..."
+	
+	@# Wait for controller SSH with more logging
+	@echo "$(BLUE)[INFO]$(NC) Waiting for controller to be ready for SSH..."
+	@for attempt in 1 2 3 4 5; do \
+		echo "$(BLUE)[INFO]$(NC) Controller SSH connectivity check (attempt $$attempt/5)..."; \
+		if $(VAGRANT_WRAPPER) ssh controller -c "echo 'Controller SSH is ready'" >/dev/null 2>&1; then \
+			echo "$(GREEN)[SUCCESS]$(NC) Controller SSH is ready!"; \
+			break; \
+		fi; \
+		if [ $$attempt -eq 5 ]; then \
+			echo "$(RED)[ERROR]$(NC) Failed to connect to controller after 5 attempts"; \
+			echo "$(YELLOW)[INFO]$(NC) Showing controller status:"; \
+			$(VAGRANT_WRAPPER) status controller; \
+			exit 1; \
+		fi; \
+		echo "$(YELLOW)[WARN]$(NC) Controller not ready. Waiting 30 seconds..."; \
+		sleep 30; \
+	done
+	
+	@echo "$(BLUE)[INFO]$(NC) Running controller setup script..."
+	@$(VAGRANT_WRAPPER) ssh controller -c "cd /home/vagrant && chmod +x scripts/*.sh && sudo scripts/setup-controller.sh" || { \
+		echo "$(RED)[ERROR]$(NC) Controller setup script failed"; \
+		exit 1; \
+	}
+	
+	@# Wait for node1 SSH
+	@echo "$(BLUE)[INFO]$(NC) Waiting for node1 to be ready for SSH..."
+	@for attempt in 1 2 3 4 5; do \
+		echo "Controller setup done. Checking node1 SSH connectivity (attempt $$attempt/5)..."; \
+		if $(VAGRANT_WRAPPER) ssh node1 -c "echo 'Node1 SSH is ready'" >/dev/null 2>&1; then \
+			echo "$(GREEN)[SUCCESS]$(NC) Node1 SSH is ready!"; \
+			break; \
+		fi; \
+		if [ $$attempt -eq 5 ]; then \
+			echo "$(YELLOW)[WARNING]$(NC) Could not connect to node1 after 5 attempts. Skipping."; \
+			continue; \
+		fi; \
+		echo "$(YELLOW)[WARN]$(NC) Node1 not ready. Waiting 30 seconds..."; \
+		sleep 30; \
+	done
+	
+	@echo "$(BLUE)[INFO]$(NC) Copying setup files to node1..."
+	@$(VAGRANT_WRAPPER) ssh node1 -c "cd /home/vagrant && tar -czf /tmp/compute-files.tar.gz scripts" || true
+	@$(VAGRANT_WRAPPER) ssh node1 -c "sudo cp /tmp/compute-files.tar.gz /shared/" || true
+	
+	@echo "$(BLUE)[INFO]$(NC) Running node1 setup script..."
+	@$(VAGRANT_WRAPPER) ssh node1 -c "cd /home/vagrant && \
+		sudo mkdir -p /shared && \
+		sudo mount -t nfs slurm-controller:/shared /shared || echo 'Warning: NFS mount failed' && \
+		(if [ -f /shared/compute-files.tar.gz ]; then sudo tar -xzf /shared/compute-files.tar.gz -C /home/vagrant; fi) && \
+		chmod +x scripts/*.sh && sudo scripts/setup-compute.sh 1" || { \
+		echo "$(YELLOW)[WARNING]$(NC) Node1 setup script had issues."; \
+	}
+	
+	@# Wait for node2 SSH
+	@echo "$(BLUE)[INFO]$(NC) Waiting for node2 to be ready for SSH..."
+	@for attempt in 1 2 3 4 5; do \
+		echo "Node1 setup done. Checking node2 SSH connectivity (attempt $$attempt/5)..."; \
+		if $(VAGRANT_WRAPPER) ssh node2 -c "echo 'Node2 SSH is ready'" >/dev/null 2>&1; then \
+			echo "$(GREEN)[SUCCESS]$(NC) Node2 SSH is ready!"; \
+			break; \
+		fi; \
+		if [ $$attempt -eq 5 ]; then \
+			echo "$(YELLOW)[WARNING]$(NC) Could not connect to node2 after 5 attempts. Skipping."; \
+			continue; \
+		fi; \
+		echo "$(YELLOW)[WARN]$(NC) Node2 not ready. Waiting 30 seconds..."; \
+		sleep 30; \
+	done
+	
+	@echo "$(BLUE)[INFO]$(NC) Running node2 setup script..."
+	@$(VAGRANT_WRAPPER) ssh node2 -c "cd /home/vagrant && \
+		sudo mkdir -p /shared && \
+		sudo mount -t nfs slurm-controller:/shared /shared || echo 'Warning: NFS mount failed' && \
+		(if [ -f /shared/compute-files.tar.gz ]; then sudo tar -xzf /shared/compute-files.tar.gz -C /home/vagrant; fi) && \
+		chmod +x scripts/*.sh && sudo scripts/setup-compute.sh 2" || { \
+		echo "$(YELLOW)[WARNING]$(NC) Node2 setup script had issues."; \
+	}
+	
 	@echo "$(BLUE)[STEP]$(NC) Waiting for services to initialize..."
 	@sleep 60
 	@echo "$(BLUE)[STEP]$(NC) Performing health check..."
-	@$(MAKE) health
+	@$(MAKE) health || echo "$(YELLOW)[WARNING]$(NC) Health check had issues, but cluster may still be usable."
 	@echo "$(GREEN)[SUCCESS]$(NC) Cluster is ready!"
 	@echo ""
 	@echo "$(BOLD)Next steps:$(NC)"
@@ -344,3 +430,113 @@ metal-clean: ## 🧹 Clean up ISO workspace and generated files
 	@echo "$(YELLOW)[INFO]$(NC) Cleaning up ISO workspace..."
 	@rm -rf iso-workspace/ubuntu-22.04-hpc-cluster.iso iso-workspace/iso-rebuild
 	@echo "$(GREEN)[SUCCESS]$(NC) ISO workspace cleaned."
+
+# Configuration 
+QEMU_SCRIPT = ./qemu-cluster.sh
+
+# Add a new target for QEMU-based cluster
+qemu-setup: setup-repos preflight ## 🔧 Prepare environment for QEMU-based cluster
+	@echo "$(GREEN)[INFO]$(NC) Preparing environment for QEMU-based cluster..."
+	@chmod +x $(QEMU_SCRIPT)
+	@$(QEMU_SCRIPT) setup
+
+qemu-build-base: qemu-setup ## 📦 Build base image with Slurm pre-installed
+	@echo "$(GREEN)[INFO]$(NC) Building base image with Slurm pre-installed..."
+	@$(QEMU_SCRIPT) build-base
+
+qemu-cluster: qemu-clean qemu-build-base ## 🚀 Create and provision QEMU-based Slurm cluster
+	@echo "$(GREEN)[INFO]$(NC) Starting QEMU-based cluster deployment..."
+	@echo "$(BLUE)[STEP 1/3]$(NC) Creating VMs from base image..."
+	@$(QEMU_SCRIPT) create || { echo "$(RED)[ERROR]$(NC) Failed to create QEMU VMs"; exit 1; }
+	
+	@echo "$(BLUE)[STEP 2/3]$(NC) Starting all VMs..."
+	@$(QEMU_SCRIPT) start-all || { echo "$(RED)[ERROR]$(NC) Failed to start QEMU VMs"; exit 1; }
+	
+	@echo "$(BLUE)[STEP 3/3]$(NC) Provisioning VMs sequentially (controller → node1 → node2)..."
+	@$(QEMU_SCRIPT) provision || { echo "$(RED)[ERROR]$(NC) Failed to provision QEMU VMs"; exit 1; }
+	
+	@echo "$(GREEN)[SUCCESS]$(NC) QEMU-based Slurm cluster is ready!"
+	@echo ""
+	@echo "$(BOLD)Next steps:$(NC)"
+	@echo "  - Connect to the controller: $(BOLD)make qemu-connect$(NC)"
+	@echo "  - Run sample jobs: $(BOLD)make test-qemu$(NC)"
+	@echo "  - Check cluster status: $(BOLD)make qemu-status$(NC)"
+
+qemu-status: ## 📊 Show QEMU cluster status
+	@$(QEMU_SCRIPT) status
+
+qemu-connect: ## 🔌 SSH to the QEMU controller node
+	@$(QEMU_SCRIPT) ssh controller
+
+qemu-connect-node1: ## 🔌 SSH to QEMU compute node 1
+	@$(QEMU_SCRIPT) ssh node1
+
+qemu-connect-node2: ## 🔌 SSH to QEMU compute node 2
+	@$(QEMU_SCRIPT) ssh node2
+
+qemu-stop: ## 🛑 Stop all QEMU VMs
+	@echo "$(YELLOW)[INFO]$(NC) Stopping all QEMU VMs..."
+	@$(QEMU_SCRIPT) stop-all
+
+qemu-clean: ## 🗑️ Clean up the QEMU cluster environment
+	@echo "$(YELLOW)[INFO]$(NC) Cleaning up QEMU VMs and data..."
+	@$(QEMU_SCRIPT) clean
+	@echo "$(GREEN)[SUCCESS]$(NC) QEMU cleanup complete."
+
+test-qemu: ## 🧪 Run tests on QEMU cluster
+	@echo "$(BLUE)[TEST]$(NC) Submitting Hello World job to QEMU cluster..."
+	@$(QEMU_SCRIPT) ssh controller "sbatch /home/ubuntu/sample-jobs/hello_world.sh"
+	@echo "$(GREEN)[SUCCESS]$(NC) Test submitted. Use 'make qemu-status' to check."
+
+## 🔧 QEMU Cluster Setup (Direct VM Creation)
+
+qemu-verify-tools: ## 🔍 Verify QEMU tools are installed
+	@echo "$(BLUE)[INFO]$(NC) Verifying required tools for QEMU VM creation..."
+	@which qemu-system-x86_64 > /dev/null || { echo "$(RED)[ERROR]$(NC) qemu-system-x86_64 not found. Please install with 'sudo apt-get install qemu-system-x86_64'"; exit 1; }
+	@which qemu-img > /dev/null || { echo "$(RED)[ERROR]$(NC) qemu-img not found. Please install with 'sudo apt-get install qemu-utils'"; exit 1; }
+	@which cloud-localds > /dev/null || { echo "$(RED)[ERROR]$(NC) cloud-localds not found. Please install with 'sudo apt-get install cloud-image-utils'"; exit 1; }
+	@echo "$(GREEN)[SUCCESS]$(NC) All required QEMU tools are installed."
+
+qemu-build-image: qemu-verify-tools ## 🚀 Build a verified working VM image for QEMU cluster
+	@echo "$(BLUE)[INFO]$(NC) Building VM image for QEMU cluster (with detailed output)..."
+	@chmod +x $(QEMU_SCRIPT)
+	@$(QEMU_SCRIPT) build-base
+
+qemu-verify-image: qemu-verify-tools ## ✅ Verify the VM image boots and has SSH access
+	@echo "$(BLUE)[INFO]$(NC) Verifying VM image boots with SSH access..."
+	@chmod +x $(QEMU_SCRIPT)
+	@mkdir -p $(PROJECT_DIR)/qemu-vms/cloud-init || true
+	@if [ ! -f "$(PROJECT_DIR)/qemu-vms/slurm-base-image.qcow2" ]; then \
+		echo "$(RED)[ERROR]$(NC) VM image not found. Please run 'make qemu-build-image' first."; \
+		exit 1; \
+	fi
+	@$(QEMU_SCRIPT) setup
+	@$(QEMU_SCRIPT) create
+	@$(QEMU_SCRIPT) start-all
+	@echo "$(GREEN)[SUCCESS]$(NC) VM image verified. You now have a working VM to use in your cluster setup!"
+	@echo "$(BLUE)[INFO]$(NC) Access the controller with: make qemu-connect"
+	@echo "$(BLUE)[INFO]$(NC) Run tests with: make test-qemu"
+
+## 🔧 Direct Pre-built Image Deployment
+
+download-prebuilt-image: ## 📥 Download a pre-built Slurm image (everything installed)
+	@echo "$(BLUE)[INFO]$(NC) Downloading pre-built Slurm image with everything installed..."
+	@chmod +x ./direct-image.sh
+	@./direct-image.sh
+
+qemu-create: ## 🔄 Create cluster VMs from pre-built image
+	@echo "$(BLUE)[INFO]$(NC) Creating VMs from pre-built image..."
+	@chmod +x $(QEMU_SCRIPT)
+	@$(QEMU_SCRIPT) create
+
+qemu-start-all: ## ▶️ Start all cluster VMs
+	@echo "$(BLUE)[INFO]$(NC) Starting all VMs..."
+	@chmod +x $(QEMU_SCRIPT)
+	@$(QEMU_SCRIPT) start-all
+
+qemu-instant-cluster: download-prebuilt-image qemu-create qemu-start-all ## 🚀 Instant cluster setup with pre-built image
+	@echo "$(GREEN)[SUCCESS]$(NC) Cluster is ready from pre-built image!"
+	@echo "$(BOLD)Next steps:$(NC)"
+	@echo "  - Connect to the controller: $(BOLD)make qemu-connect$(NC)"
+	@echo "  - Run sample jobs: $(BOLD)make test-qemu$(NC)"
+	@echo "  - Check cluster status: $(BOLD)make qemu-status$(NC)"

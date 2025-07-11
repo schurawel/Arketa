@@ -1,9 +1,33 @@
 #!/bin/bash
-# Slurm Controller Setup Script
+# Slurm Controller Node Setup Script
 
 set -e
 
 echo "Setting up Slurm Controller Node..."
+
+# Add host entries (moved from Vagrantfile)
+grep -q "slurm-controller" /etc/hosts || echo "192.168.121.10 slurm-controller controller" >> /etc/hosts
+grep -q "node1" /etc/hosts || echo "192.168.121.11 node1" >> /etc/hosts
+grep -q "node2" /etc/hosts || echo "192.168.121.12 node2" >> /etc/hosts
+
+# Set hostname
+hostnamectl set-hostname slurm-controller
+
+# Set up NFS server (moved from Vagrantfile)
+echo "Setting up NFS server for shared directories..."
+apt-get update
+apt-get install -y nfs-kernel-server
+
+# Setup shared directory
+mkdir -p /shared
+chown slurm:slurm /shared
+chmod 755 /shared
+
+# Configure NFS export for shared directory
+grep -q "/shared 192.168.121.0/24" /etc/exports || echo "/shared 192.168.121.0/24(rw,sync,no_subtree_check,no_root_squash)" >> /etc/exports
+systemctl enable nfs-kernel-server
+systemctl start nfs-kernel-server
+exportfs -a
 
 # Source the Slurm environment (should be available from base setup)
 if ! grep -q "/opt/slurm/bin" /etc/environment; then
@@ -202,6 +226,35 @@ if ! systemctl start slurmd; then
     timeout 10 /opt/slurm/sbin/slurmd -D -vvv || true
     exit 1
 fi
+
+# Run the setup script for the Slurm Database Daemon
+/home/vagrant/scripts/setup-slurmdbd.sh
+
+# Install and configure Open OnDemand
+echo "🌐 Setting up Open OnDemand..."
+if [ -f /home/vagrant/scripts/setup-ondemand.sh ]; then
+  chmod +x /home/vagrant/scripts/setup-ondemand.sh
+  /home/vagrant/scripts/setup-ondemand.sh
+  echo "✅ Open OnDemand setup complete."
+  echo "👉 Access the portal at http://localhost:8080"
+else
+  echo "🤷 Skipping Open OnDemand setup: script not found."
+fi
+
+# Install and configure slurm-web from source
+echo "🌐 Setting up slurm-web from source..."
+if [ -f /home/vagrant/scripts/setup-slurm-web.sh ]; then
+  chmod +x /home/vagrant/scripts/setup-slurm-web.sh
+  /home/vagrant/scripts/setup-slurm-web.sh
+  echo "✅ slurm-web setup complete."
+  echo "👉 Access the portal at http://localhost:8081"
+else
+  echo "🤷 Skipping slurm-web setup: script not found."
+fi
+
+# Mark controller as fully provisioned for compute nodes
+echo "🎯 Controller provisioning complete"
+echo "✅ Controller node fully configured and ready for compute nodes"
 
 echo "Slurm Controller setup completed!"
 echo "You can check the status with: systemctl status slurmctld"

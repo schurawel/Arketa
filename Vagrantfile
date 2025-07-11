@@ -131,76 +131,29 @@ Vagrant.configure("2") do |config|
       
       # Make scripts executable
       chmod +x /home/vagrant/scripts/*.sh
-
-      echo "192.168.121.10 slurm-controller controller" >> /etc/hosts
-      echo "192.168.121.11 node1" >> /etc/hosts
-      echo "192.168.121.12 node2" >> /etc/hosts
       
-      # Set hostname
-      hostnamectl set-hostname slurm-controller
-      
-      apt-get update
-      apt-get install -y nfs-kernel-server
-      
-      # Setup shared directory
-      mkdir -p /shared
-      chown slurm:slurm /shared
-      chmod 755 /shared
-      
-      # Configure NFS export for shared directory
-      echo "/shared 192.168.121.0/24(rw,sync,no_subtree_check,no_root_squash)" >> /etc/exports
-      systemctl enable nfs-kernel-server
-      systemctl start nfs-kernel-server
-      exportfs -a
-      
-      # Run controller setup script
+      # Run controller setup script - web UIs and services now in this script
       /home/vagrant/scripts/setup-controller.sh
-
-      # Run the setup script for the Slurm Database Daemon
-      /home/vagrant/scripts/setup-slurmdbd.sh
       
       echo "✅ Slurm Database Daemon setup complete."
     SHELL
 
-    # Install and configure Open OnDemand
-    controller.vm.provision "shell", inline: <<-SHELL
-      echo "🌐 Setting up Open OnDemand..."
-      if [ -f /home/vagrant/scripts/setup-ondemand.sh ]; then
-        chmod +x /home/vagrant/scripts/setup-ondemand.sh
-        /home/vagrant/scripts/setup-ondemand.sh
-        echo "✅ Open OnDemand setup complete."
-        echo "👉 Access the portal at http://localhost:8080"
-      else
-        echo "🤷 Skipping Open OnDemand setup: script not found."
-      fi
-    SHELL
-
-    # Install and configure slurm-web from source
-    controller.vm.provision "shell", inline: <<-SHELL
-      echo "🌐 Setting up slurm-web from source..."
-      if [ -f /home/vagrant/scripts/setup-slurm-web.sh ]; then
-        chmod +x /home/vagrant/scripts/setup-slurm-web.sh
-        /home/vagrant/scripts/setup-slurm-web.sh
-        echo "✅ slurm-web setup complete."
-        echo "👉 Access the portal at http://localhost:8081"
-      else
-        echo "🤷 Skipping slurm-web setup: script not found."
-      fi
-    SHELL
-
-    # Mark controller as fully provisioned
-    controller.vm.provision "shell", inline: <<-SHELL
-      echo "🎯 Controller provisioning complete"
-      echo "✅ Controller node fully configured and ready for compute nodes"
-    SHELL
+    # Tell Vagrant this is the main provisioning step for controller
+    controller.vm.provision "shell", 
+      name: "controller-setup-completed",
+      inline: "echo 'Controller node setup complete'"
   end
+
+  # Clear the post-up message
+  config.vm.post_up_message = "Running cluster setup sequentially after all VMs start."
 
   # Slurm Compute Nodes (slurmd)
   (1..2).each do |i|
     config.vm.define "node#{i}" do |node|
-    
+      # Start VMs in parallel with controller - no autostart flag
       node.vm.network "private_network", ip: "192.168.121.#{10 + i}"
-
+      node.vm.hostname = "node#{i}"
+      
       # Disable ALL global synced folders for compute nodes to prevent rsync SSH errors
       node.vm.synced_folder "./scripts", "/home/vagrant/scripts", disabled: true
       node.vm.synced_folder "./sample-jobs", "/home/vagrant/sample-jobs", disabled: true
@@ -210,14 +163,33 @@ Vagrant.configure("2") do |config|
       node.vm.provider "libvirt" do |lv|
         lv.memory = 3072
         lv.cpus = 2
+        # Ensure machine gets unique predictable MAC address
+        lv.random_hostname = false
+        # Improved NIC settings
+        lv.nic_model_type = "virtio"
+        # Turn on nested virtualization
+        lv.nested = true
       end
 
-      # Increase SSH boot timeout for slow VM/network
-      node.vm.boot_timeout = 300  # 5 minutes for compute nodes
+      # Increase boot timeouts
+      node.vm.boot_timeout = 600  # 10 minutes for compute nodes
       
-      # Move hostname setting to a separate provision step after SSH is ready
-      node.vm.provision "shell", inline: "hostnamectl set-hostname node#{i}"
-
+      # Add pre-provision step to verify network connectivity
+      node.vm.provision "shell", inline: <<-SHELL
+        echo "🔍 Verifying network setup..."
+        hostname
+        ip addr show
+        # Sleep to ensure network interfaces are fully up
+        sleep 10
+        ping -c 3 8.8.8.8 || echo "⚠️ Internet connectivity issue - continuing anyway"
+        echo "192.168.121.10 slurm-controller controller" >> /etc/hosts
+        echo "192.168.121.11 node1" >> /etc/hosts
+        echo "192.168.121.12 node2" >> /etc/hosts
+      SHELL
+      
+      # Set hostname using full qualified path to avoid PATH issues
+      node.vm.provision "shell", inline: "/usr/bin/hostnamectl set-hostname node#{i}"
+      
       # Use file provisioner with tarball 
       node.vm.provision "file", source: "./compute-provision-files.tar.gz", destination: "/tmp/compute-provision-files.tar.gz"
 
@@ -245,22 +217,8 @@ Vagrant.configure("2") do |config|
         
         # Make scripts executable
         chmod +x /home/vagrant/scripts/*.sh
-
-        echo "192.168.121.10 slurm-controller controller" >> /etc/hosts
-        echo "192.168.121.11 node1" >> /etc/hosts
-        echo "192.168.121.12 node2" >> /etc/hosts
         
-        # Set hostname
-        hostnamectl set-hostname node#{i}
-        
-        apt-get update
-        apt-get install -y nfs-common
-
-        # Mount shared directory
-        mkdir -p /shared
-        echo "slurm-controller:/shared /shared nfs defaults 0 0" >> /etc/fstab
-        
-        # Run compute node setup
+        # Run compute node setup - network, hostname and NFS mount moved to this script
         /home/vagrant/scripts/setup-compute.sh #{i}
 
         echo "✅ Compute node #{i} setup complete."

@@ -1,7 +1,9 @@
 #!/bin/bash
 # Simple direct VM runner - uses standard Ubuntu cloud image
 
-set -e
+# Add debug mode to see exactly where execution stops
+set -x  # Print commands as they're executed
+# set -e  # Comment out "set -e" temporarily for debugging (prevents immediate exit on error)
 
 # Colors
 RED='\033[0;31m'
@@ -14,6 +16,7 @@ NC='\033[0m'
 kill_qemu_processes() {
     echo -e "${YELLOW}Checking for running QEMU VM instances...${NC}"
     QEMU_PROCS=$(pgrep -l qemu-system)
+    echo "Debug: After pgrep command" # Debug message
     
     if [ -n "$QEMU_PROCS" ]; then
         echo -e "${RED}Found running QEMU processes:${NC}"
@@ -36,28 +39,42 @@ kill_qemu_processes() {
     else
         echo -e "${GREEN}No running QEMU processes found.${NC}"
     fi
+    echo "Debug: Finished kill_qemu_processes function" # Debug message
 }
 
 # Clear all running QEMU processes at startup
 kill_qemu_processes
+echo "Debug: After kill_qemu_processes call" # Debug message
 
 # Configuration
 UBUNTU_CLOUD_IMAGE="ubuntu-22.04-server-cloudimg-amd64.img"
 UBUNTU_CLOUD_URL="https://cloud-images.ubuntu.com/releases/22.04/release/${UBUNTU_CLOUD_IMAGE}"
 VM_DIR="/home/thinclient/Documents/PrimedSLURM/qemu-vms"
-IMAGE_PATH="${VM_DIR}/${UBUNTU_CLOUD_IMAGE}"
+PROJECT_DIR="/home/thinclient/Documents/PrimedSLURM"
+IMAGE_PATH="${PROJECT_DIR}/${UBUNTU_CLOUD_IMAGE}"  # Look for image in project dir, not VM_DIR
+
+# Check if directories exist and are writable
+echo "Debug: Checking directories"
+[ -d "${PROJECT_DIR}" ] && echo "Project dir exists" || echo "Project dir doesn't exist!"
+[ -w "${PROJECT_DIR}" ] && echo "Project dir is writable" || echo "Project dir is not writable!"
 
 # Create VM directory
 mkdir -p "${VM_DIR}"
+echo "Debug: After mkdir" # Debug message
 
 # Download image if needed
 if [ ! -f "${IMAGE_PATH}" ]; then
     echo -e "${BLUE}Downloading Ubuntu cloud image...${NC}"
+    echo "Debug: Will download to ${IMAGE_PATH}" # Debug message
+    
+    # Try with less restrictions
     wget --progress=dot:giga -O "${IMAGE_PATH}" "${UBUNTU_CLOUD_URL}" || {
         echo -e "${RED}Failed to download image${NC}"
+        echo "Debug: wget failed" # Debug message
         exit 1
     }
 fi
+echo "Debug: After image check/download" # Debug message
 
 # Set login credentials - will be configured in cloud-init
 VM_USERNAME="ubuntu"
@@ -99,7 +116,7 @@ packages:
   - curl
   - iputils-ping
 
-# Network configuration
+# Network configuration with proper DNS
 write_files:
   - path: /etc/netplan/50-cloud-init.yaml
     content: |
@@ -108,6 +125,8 @@ write_files:
         ethernets:
           ens3:
             dhcp4: true
+            nameservers:
+              addresses: [8.8.8.8, 8.8.4.4]
             optional: true
 
 # Run commands to ensure network is properly configured
@@ -144,10 +163,12 @@ trap 'echo -e "\n${YELLOW}Ctrl+C detected. Proceeding to save VM state...${NC}"'
 # Create a temporary overlay disk to capture changes during the session
 TEMP_DISK="${VM_DIR}/temp-session.qcow2"
 echo -e "${BLUE}Creating temporary session disk...${NC}"
-qemu-img create -f qcow2 -F qcow2 -b "${IMAGE_PATH}" "${TEMP_DISK}"
+qemu-img create -f qcow2 -F qcow2 -b "${IMAGE_PATH}" "${TEMP_DISK}" 30G
 
 # Run VM with cloud-init, using the temporary disk
 qemu-system-x86_64 -m 4096 -smp 4 \
+    -enable-kvm \
+    -cpu host \
     -drive file="${TEMP_DISK}",format=qcow2 \
     -drive file="${CLOUD_INIT_DIR}/seed.iso",format=raw \
     -device virtio-net-pci,netdev=net0 \

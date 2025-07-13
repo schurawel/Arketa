@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script to start two VMs with bridged networking - CONFIGURE FIRST, THEN CONNECT BRIDGE
+# Script to start two VMs with virtual switch networking - CONFIGURE FIRST, THEN CONNECT SWITCH
 
 # Colors for output
 RED='\033[0;31m'
@@ -38,21 +38,30 @@ kill_qemu_processes() {
     fi
 }
 
-# Improved bridge network setup with proper internet access
-setup_bridge() {
-    BRIDGE_NAME="qemubr0"
+# Function to setup virtual switch using Open vSwitch
+setup_virtual_switch() {
+    SWITCH_NAME="vswitch0"
+    INTERNAL_PORT="vswitch0-int"  # Shortened to fit 15-char limit
     
-    echo -e "${BLUE}Setting up Linux bridge network ${BRIDGE_NAME} with internet access...${NC}"
+    echo -e "${BLUE}Setting up Open vSwitch virtual switch ${SWITCH_NAME} with internet access...${NC}"
     
-    # Remove existing bridge if it exists to ensure clean setup
-    if ip link show "${BRIDGE_NAME}" >/dev/null 2>&1; then
-        echo -e "${YELLOW}Removing existing bridge interface...${NC}"
-        sudo ip link set "${BRIDGE_NAME}" down || true
-        sudo ip link delete "${BRIDGE_NAME}" || true
+    # Install Open vSwitch if not already installed
+    if ! command -v ovs-vsctl &> /dev/null; then
+        echo -e "${YELLOW}Installing Open vSwitch...${NC}"
+        sudo apt-get update
+        sudo apt-get install -y openvswitch-switch openvswitch-common
+        sudo systemctl start openvswitch-switch
+        sudo systemctl enable openvswitch-switch
+    fi
+    
+    # Remove existing switch if it exists
+    if sudo ovs-vsctl br-exists "${SWITCH_NAME}" 2>/dev/null; then
+        echo -e "${YELLOW}Removing existing virtual switch...${NC}"
+        sudo ovs-vsctl del-br "${SWITCH_NAME}"
         sleep 2
     fi
     
-    # Find the default network interface that has internet access
+    # Find the default network interface
     echo -e "${BLUE}Finding default internet interface...${NC}"
     DEFAULT_IFACE=$(ip route show default | grep -Eo 'dev [^ ]+' | cut -d ' ' -f 2)
     if [ -z "$DEFAULT_IFACE" ]; then
@@ -61,90 +70,148 @@ setup_bridge() {
     fi
     echo -e "${GREEN}Using ${DEFAULT_IFACE} as the internet-connected interface.${NC}"
     
-    # Create bridge interface
-    echo -e "${BLUE}Creating bridge interface ${BRIDGE_NAME}...${NC}"
-    sudo ip link add name "${BRIDGE_NAME}" type bridge || {
-        echo -e "${RED}Failed to create bridge. Trying alternative method...${NC}"
-        sudo brctl addbr "${BRIDGE_NAME}" || {
-            echo -e "${RED}Failed to create bridge. Cannot continue.${NC}"
-            exit 1
-        }
-    }
+    # Create virtual switch
+    echo -e "${BLUE}Creating virtual switch ${SWITCH_NAME}...${NC}"
+    sudo ovs-vsctl add-br "${SWITCH_NAME}"
     
-    # Configure bridge parameters for better performance
-    sudo ip link set "${BRIDGE_NAME}" type bridge forward_delay 0
-    sudo ip link set "${BRIDGE_NAME}" type bridge stp_state 0
+    # Create internal port for host connectivity with shorter name
+    echo -e "${BLUE}Creating internal port for host connectivity...${NC}"
+    sudo ovs-vsctl add-port "${SWITCH_NAME}" "${INTERNAL_PORT}" -- set interface "${INTERNAL_PORT}" type=internal
     
-    # Add IP to bridge
-    sudo ip addr add 192.168.7.1/24 dev "${BRIDGE_NAME}" || {
-        echo -e "${RED}Failed to add IP to bridge. Cannot continue.${NC}"
-        exit 1
-    }
+    # Wait for interface to be created
+    sleep 2
     
-    # Bring bridge up
-    sudo ip link set "${BRIDGE_NAME}" up || {
-        echo -e "${RED}Failed to bring bridge up. Cannot continue.${NC}"
-        exit 1
-    }
+    # Configure the internal port
+    sudo ip link set "${INTERNAL_PORT}" up
+    sudo ip addr add 192.168.7.1/24 dev "${INTERNAL_PORT}"
     
-    # Set up NAT to allow VMs to access the internet
+    # Create TAP interfaces for VMs
+    echo -e "${BLUE}Creating TAP interfaces for VMs...${NC}"
+    for i in 0 1; do
+        TAP_NAME="tap${i}"
+        # Remove if exists
+        sudo ip link delete "${TAP_NAME}" 2>/dev/null || true
+        # Create new TAP interface
+        sudo ip tuntap add mode tap "${TAP_NAME}"
+        sudo ip link set "${TAP_NAME}" up
+        # Add TAP to virtual switch
+        sudo ovs-vsctl add-port "${SWITCH_NAME}" "${TAP_NAME}"
+    done
+    
+    # Set up NAT for internet access
     echo -e "${BLUE}Setting up NAT for internet access...${NC}"
     
-    # Clear any existing NAT rules for this subnet to avoid duplicates
+    # Clear existing NAT rules
     sudo iptables -t nat -D POSTROUTING -s 192.168.7.0/24 -j MASQUERADE 2>/dev/null || true
     
-    # Add NAT rule for outgoing traffic
-    sudo iptables -t nat -A POSTROUTING -s 192.168.7.0/24 -o "${DEFAULT_IFACE}" -j MASQUERADE || {
-        echo -e "${RED}Failed to set up NAT. Internet access may not work.${NC}"
-    }
+    # Add NAT rule
+    sudo iptables -t nat -A POSTROUTING -s 192.168.7.0/24 -o "${DEFAULT_IFACE}" -j MASQUERADE
     
-    # Allow forwarding between bridge and default interface
-    sudo iptables -D FORWARD -i "${BRIDGE_NAME}" -o "${DEFAULT_IFACE}" -j ACCEPT 2>/dev/null || true
-    sudo iptables -A FORWARD -i "${BRIDGE_NAME}" -o "${DEFAULT_IFACE}" -j ACCEPT
+    # Allow forwarding using the shortened interface name
+    sudo iptables -D FORWARD -i "${INTERNAL_PORT}" -o "${DEFAULT_IFACE}" -j ACCEPT 2>/dev/null || true
+    sudo iptables -A FORWARD -i "${INTERNAL_PORT}" -o "${DEFAULT_IFACE}" -j ACCEPT
     
-    sudo iptables -D FORWARD -i "${DEFAULT_IFACE}" -o "${BRIDGE_NAME}" -j ACCEPT 2>/dev/null || true
-    sudo iptables -A FORWARD -i "${DEFAULT_IFACE}" -o "${BRIDGE_NAME}" -j ACCEPT
+    sudo iptables -D FORWARD -i "${DEFAULT_IFACE}" -o "${INTERNAL_PORT}" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    sudo iptables -A FORWARD -i "${DEFAULT_IFACE}" -o "${INTERNAL_PORT}" -m state --state RELATED,ESTABLISHED -j ACCEPT
     
-    # Enable IP forwarding (make it persistent)
-    echo -e "${BLUE}Enabling IP forwarding...${NC}"
+    # Enable IP forwarding
     echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
     sudo sysctl -w net.ipv4.ip_forward=1
     
-    # Ensure QEMU has access to the bridge - FIX PERMISSIONS
-    echo -e "${BLUE}Setting up QEMU bridge permissions...${NC}"
-    sudo mkdir -p /etc/qemu
-    echo "allow ${BRIDGE_NAME}" | sudo tee /etc/qemu/bridge.conf > /dev/null
+    # Verify internal interface is up
+    echo -e "${BLUE}Verifying internal interface configuration...${NC}"
+    ip addr show "${INTERNAL_PORT}"
     
-    # Make sure qemu-bridge-helper has correct permissions
-    QEMU_BRIDGE_HELPER=$(which qemu-bridge-helper 2>/dev/null || echo "/usr/lib/qemu/qemu-bridge-helper")
-    if [ -f "$QEMU_BRIDGE_HELPER" ]; then
-        echo -e "${GREEN}Found qemu-bridge-helper at ${QEMU_BRIDGE_HELPER}${NC}"
-        # Make sure it's setuid root
-        sudo chown root:root "$QEMU_BRIDGE_HELPER"
-        sudo chmod u+s "$QEMU_BRIDGE_HELPER"
-    else
-        echo -e "${RED}qemu-bridge-helper not found. Bridge networking may fail.${NC}"
-        # Try to find it in other common locations
-        for path in /usr/libexec/qemu-bridge-helper /usr/local/libexec/qemu-bridge-helper; do
-            if [ -f "$path" ]; then
-                echo -e "${GREEN}Found alternative qemu-bridge-helper at ${path}${NC}"
-                QEMU_BRIDGE_HELPER="$path"
-                sudo chown root:root "$QEMU_BRIDGE_HELPER"
-                sudo chmod u+s "$QEMU_BRIDGE_HELPER"
-                break
-            fi
-        done
-    fi
+    # Show virtual switch configuration
+    echo -e "${BLUE}Virtual switch configuration:${NC}"
+    sudo ovs-vsctl show
     
-    # Verify bridge setup
-    echo -e "${BLUE}Bridge configuration:${NC}"
-    ip addr show "${BRIDGE_NAME}"
-    ip route show | grep "${BRIDGE_NAME}"
+    echo -e "${GREEN}Virtual switch setup completed.${NC}"
+}
+
+# Improved bridge network setup with proper internet access
+setup_bridge() {
+    # Call the virtual switch setup instead
+    setup_virtual_switch
+}
+
+# Function to start VMs with virtual switch networking
+start_vms_with_bridge() {
+    echo -e "${BLUE}PHASE 4: Starting VMs with virtual switch networking ONLY (NO PORT FORWARDING)${NC}"
     
-    echo -e "${GREEN}Bridge setup with internet access completed.${NC}"
+    # Set permissions for TAP interfaces before starting VMs
+    echo -e "${BLUE}Setting TAP interface permissions...${NC}"
+    sudo chown $(whoami) /dev/net/tun
     
-    # Export bridge helper path for child processes
-    export QEMU_BRIDGE_HELPER
+    # Ensure TAP interfaces are up
+    sudo ip link set tap0 up
+    sudo ip link set tap1 up
+    
+    # Create VM1 script with TAP interface ONLY
+    VM1_BRIDGE_SCRIPT="${TMP_DIR}/vm1_bridge_${SESSION_ID}.sh"
+    cat > "${VM1_BRIDGE_SCRIPT}" <<EOF
+#!/bin/bash
+echo "Starting VM1 with virtual switch networking ONLY..."
+
+export QEMU_AUDIO_DRV=none
+
+# Run QEMU with ONLY TAP networking - NO USER NETWORKING
+exec sudo qemu-system-x86_64 -m 4096 -smp 4 \\
+    -enable-kvm \\
+    -cpu host \\
+    -drive file="${TEMP_DISK1}",format=qcow2 \\
+    -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \\
+    -device virtio-net-pci,netdev=net0,mac=${VM1_MAC} \\
+    -nographic \\
+    -serial mon:stdio
+EOF
+    chmod +x "${VM1_BRIDGE_SCRIPT}"
+    
+    # Create VM2 script with TAP interface ONLY
+    VM2_BRIDGE_SCRIPT="${TMP_DIR}/vm2_bridge_${SESSION_ID}.sh"
+    cat > "${VM2_BRIDGE_SCRIPT}" <<EOF
+#!/bin/bash
+echo "Starting VM2 with virtual switch networking ONLY..."
+
+export QEMU_AUDIO_DRV=none
+
+# Run QEMU with ONLY TAP networking - NO USER NETWORKING
+exec sudo qemu-system-x86_64 -m 4096 -smp 4 \\
+    -enable-kvm \\
+    -cpu host \\
+    -drive file="${TEMP_DISK2}",format=qcow2 \\
+    -netdev tap,id=net0,ifname=tap1,script=no,downscript=no \\
+    -device virtio-net-pci,netdev=net0,mac=${VM2_MAC} \\
+    -nographic \\
+    -serial mon:stdio
+EOF
+    chmod +x "${VM2_BRIDGE_SCRIPT}"
+    
+    # Start VMs
+    echo -e "${BLUE}Starting VM1 with virtual switch networking ONLY...${NC}"
+    xterm -title "VM1 Console" -e "${VM1_BRIDGE_SCRIPT}" &
+    
+    echo -e "${BLUE}Starting VM2 with virtual switch networking ONLY...${NC}"
+    xterm -title "VM2 Console" -e "${VM2_BRIDGE_SCRIPT}" &
+    
+    # Wait for VMs to boot
+    echo -e "${YELLOW}Waiting 45 seconds for VMs to boot with virtual switch networking...${NC}"
+    sleep 45
+    
+    # Debug: Check virtual switch status
+    echo -e "${BLUE}Virtual switch status after VM startup:${NC}"
+    sudo ovs-vsctl show
+    sudo ovs-vsctl list-ports ${SWITCH_NAME}
+    
+    # Show TAP interface status
+    echo -e "${BLUE}TAP interface status:${NC}"
+    ip link show tap0
+    ip link show tap1
+    
+    # Wait for SSH to be available on REAL IPs ONLY
+    echo -e "${BLUE}Waiting for VM SSH to be available on REAL NETWORK IPs...${NC}"
+    wait_for_ssh_direct "${VM1_IP}" "VM1"
+    wait_for_ssh_direct "${VM2_IP}" "VM2"
 }
 
 # Function to start VMs with only user networking
@@ -196,10 +263,55 @@ EOF
     xterm -title "VM2 Console" -e "${VM2_USER_SCRIPT}" &
     VM2_PID=$!
     
+    # Give VMs more time to boot before checking SSH
+    echo -e "${YELLOW}Waiting 10 seconds for VMs to boot...${NC}"
+    sleep 10
+    
     # Wait for SSH to be available - ONLY USE PORT FORWARDING IN PHASE 1
     echo -e "${BLUE}Waiting for SSH to be available...${NC}"
-    wait_for_ssh "localhost" "2222" "VM1"
-    wait_for_ssh "localhost" "2223" "VM2"
+    
+    # Check if VMs are still running
+    if ! ps -p $VM1_PID > /dev/null && ! pgrep -f "qemu.*${TEMP_DISK1}" > /dev/null; then
+        echo -e "${RED}VM1 process has terminated unexpectedly. Check xterm window for errors.${NC}"
+        exit 1
+    fi
+    
+    if ! ps -p $VM2_PID > /dev/null && ! pgrep -f "qemu.*${TEMP_DISK2}" > /dev/null; then
+        echo -e "${RED}VM2 process has terminated unexpectedly. Check xterm window for errors.${NC}"
+        exit 1
+    fi
+    
+    # Test port connectivity
+    echo -e "${BLUE}Testing port connectivity...${NC}"
+    if ! nc -z localhost 2222; then
+        echo -e "${RED}Cannot connect to VM1 port 2222. VM might not have started properly.${NC}"
+        echo -e "${YELLOW}Trying alternative approach...${NC}"
+        
+        # Try starting with direct virtual switch networking only
+        echo -e "${BLUE}Skipping port forwarding configuration and proceeding directly to virtual switch setup.${NC}"
+        return 1
+    fi
+    
+    if ! nc -z localhost 2223; then
+        echo -e "${RED}Cannot connect to VM2 port 2223. VM might not have started properly.${NC}"
+        echo -e "${YELLOW}Trying alternative approach...${NC}"
+        
+        # Try starting with direct virtual switch networking only
+        echo -e "${BLUE}Skipping port forwarding configuration and proceeding directly to virtual switch setup.${NC}"
+        return 1
+    fi
+    
+    wait_for_ssh "localhost" "2222" "VM1" || {
+        echo -e "${RED}Failed to connect to VM1 SSH. Trying alternative approach.${NC}"
+        return 1
+    }
+    
+    wait_for_ssh "localhost" "2223" "VM2" || {
+        echo -e "${RED}Failed to connect to VM2 SSH. Trying alternative approach.${NC}"
+        return 1
+    }
+    
+    return 0
 }
 
 # Function to configure network inside VM with improved resilience against hanging
@@ -210,58 +322,37 @@ configure_network() {
     local other_vm_name=$4
     local other_vm_ip=$5
     
-    echo -e "${BLUE}Configuring network in ${vm_name} with non-blocking approach...${NC}"
+    echo -e "${BLUE}Configuring network in ${vm_name} for static IP ${static_ip}...${NC}"
     
-    # Create a detached background script to avoid hanging the SSH session
+    # Configure network via SSH
     sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no -p ${ssh_port} ubuntu@localhost << EOF
 # Disable systemd network wait services
 echo "Disabling systemd network wait services..."
-sudo systemctl disable systemd-networkd-wait-online.service
-sudo systemctl mask systemd-networkd-wait-online.service
-sudo systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
-sudo systemctl mask NetworkManager-wait-online.service 2>/dev/null || true
+sudo systemctl disable systemd-networkd-wait-online.service 2>/dev/null || true
+sudo systemctl mask systemd-networkd-wait-online.service 2>/dev/null || true
 
-# Create a file to disable cloud-init network config which can cause delays
+# Disable cloud-init network configuration
+echo "Disabling cloud-init network configuration..."
 sudo touch /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
 echo "network: {config: disabled}" | sudo tee /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
 
-# Completely remove Netplan files that might be interfering
-echo "Removing any existing netplan configurations..."
+# Remove any existing netplan configurations
+echo "Removing existing netplan configurations..."
 sudo rm -f /etc/netplan/*.yaml
 
-# Find network interface
-echo "Detecting network interfaces..."
+# Detect the network interface
+echo "Detecting network interface..."
 IFACE=\$(ip link | grep -v lo | grep -E "ens|enp|eth" | head -1 | cut -d: -f2 | tr -d ' ')
-echo "Using \$IFACE as bridge interface"
+echo "Found interface: \$IFACE"
 
-# Disable problematic services
-echo "Disabling network services that might cause issues..."
-sudo systemctl stop systemd-resolved || true
-sudo systemctl disable systemd-resolved || true
-
-# Create a background script that will configure the network
-# This prevents SSH session from hanging due to network changes
-cat > /tmp/configure_network.sh << 'NETSCRIPT'
-#!/bin/bash
-
-# Wait a moment to ensure we don't interrupt current SSH session
-sleep 5
-
-# Get interface name
-IFACE=\$(ip link | grep -v lo | grep -E "ens|enp|eth" | head -1 | cut -d: -f2 | tr -d ' ')
-
-# Create netplan configuration for static IP
-sudo mkdir -p /etc/netplan
-
-# Remove existing netplan configs to avoid conflicts
-sudo rm -f /etc/netplan/*.yaml
-
+# Create a simple netplan configuration
+echo "Creating netplan configuration..."
 cat > /tmp/01-netcfg.yaml << NETPLAN
 network:
   version: 2
   renderer: networkd
   ethernets:
-    \$IFACE:
+    \${IFACE}:
       dhcp4: no
       addresses: [${static_ip}/24]
       routes:
@@ -274,116 +365,78 @@ NETPLAN
 sudo mv /tmp/01-netcfg.yaml /etc/netplan/01-netcfg.yaml
 sudo chmod 600 /etc/netplan/01-netcfg.yaml
 
-# Apply the netplan config
-echo "Applying netplan configuration..."
-sudo netplan generate
-sudo netplan apply
+# Create rc.local script to ensure network comes up on boot
+echo "Creating network startup script..."
+cat > /tmp/rc.local << 'RCLOCAL'
+#!/bin/bash
+# Wait for network interface
+sleep 5
 
-# Configure direct IP as backup (in case netplan fails)
-echo "Setting up manual IP configuration as backup..."
-sudo ip addr flush dev \$IFACE
-sudo ip addr add ${static_ip}/24 dev \$IFACE
-sudo ip link set \$IFACE up
-sudo ip route add default via 192.168.7.1 dev \$IFACE
+# Get interface name
+IFACE=\$(ip link | grep -v lo | grep -E "ens|enp|eth" | head -1 | cut -d: -f2 | tr -d ' ')
 
-# Set up proper DNS resolution
+if [ -n "\$IFACE" ]; then
+    # Bring interface up
+    ip link set \$IFACE up
+    
+    # Apply static IP
+    ip addr flush dev \$IFACE
+    ip addr add ${static_ip}/24 dev \$IFACE
+    ip link set \$IFACE up
+    
+    # Add default route
+    ip route del default 2>/dev/null || true
+    ip route add default via 192.168.7.1
+    
+    # Try netplan apply (may fail but that's ok)
+    netplan apply 2>/dev/null || true
+fi
+
+exit 0
+RCLOCAL
+
+sudo mv /tmp/rc.local /etc/rc.local
+sudo chmod +x /etc/rc.local
+
+# Enable rc-local service
+sudo systemctl enable rc-local 2>/dev/null || true
+
+# Configure DNS
 echo "Configuring DNS..."
-sudo rm -f /etc/resolv.conf
 cat > /tmp/resolv.conf << DNSCONF
 nameserver 8.8.8.8
 nameserver 8.8.4.4
 DNSCONF
 sudo mv /tmp/resolv.conf /etc/resolv.conf
-sudo chown root:root /etc/resolv.conf
-sudo chmod 644 /etc/resolv.conf
 
-# Prevent systemd from overwriting resolv.conf
-sudo mkdir -p /etc/systemd/resolved.conf.d/
-cat > /tmp/dns.conf << RESOLVED
-[Resolve]
-DNS=8.8.8.8 8.8.4.4
-LLMNR=no
-DNSSEC=no
-DNSOverTLS=no
-RESOLVED
-sudo mv /tmp/dns.conf /etc/systemd/resolved.conf.d/dns.conf
+# Disable systemd-resolved to prevent DNS issues
+sudo systemctl stop systemd-resolved 2>/dev/null || true
+sudo systemctl disable systemd-resolved 2>/dev/null || true
 
 # Add hosts entries
 echo "Configuring hosts file..."
 grep -q "${other_vm_ip} ${other_vm_name}" /etc/hosts || echo "${other_vm_ip} ${other_vm_name}" | sudo tee -a /etc/hosts
 grep -q "192.168.7.1 bridge-host" /etc/hosts || echo "192.168.7.1 bridge-host" | sudo tee -a /etc/hosts
 
-# Configure SSH server
-echo "Configuring SSH server..."
-sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
-sudo sed -i 's/#ListenAddress 0.0.0.0/ListenAddress 0.0.0.0/' /etc/ssh/sshd_config
-sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+# Configure SSH
+echo "Configuring SSH..."
+sudo sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+sudo sed -i 's/#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 sudo systemctl restart ssh
 
-# Signal completion
-touch /tmp/network_configured
-echo "Network configuration completed at \$(date)" > /tmp/network_setup.log
-echo "IP: ${static_ip}" >> /tmp/network_setup.log
-echo "Gateway: 192.168.7.1" >> /tmp/network_setup.log
-echo "DNS: 8.8.8.8, 8.8.4.4" >> /tmp/network_setup.log
-NETSCRIPT
-
-# Make the script executable
-chmod +x /tmp/configure_network.sh
-
-# Run the script in the background so it doesn't hang SSH session
-echo "Configuring static IP ${static_ip} in background process..."
-nohup /tmp/configure_network.sh >/dev/null 2>&1 &
-
-# Don't wait for completion - let it run in background
-echo "Network configuration initiated in background process."
-echo "Setup will continue after VM shutdown/restart."
+echo "Network configuration completed for ${vm_name} with IP ${static_ip}"
+echo "Network will be applied after VM restart."
 EOF
     
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}Network configuration initiated in ${vm_name} (running in background).${NC}"
+        echo -e "${GREEN}Network configuration completed in ${vm_name}.${NC}"
     else
-        echo -e "${RED}Failed to initiate network configuration in ${vm_name}.${NC}"
+        echo -e "${RED}Failed to configure network in ${vm_name}.${NC}"
         return 1
     fi
     
-    return 0  # Return success as configuration is running in background
+    return 0
 }
-
-# Function to wait for SSH to be available - DIRECT IP VERSION
-wait_for_ssh_direct() {
-    local ip=$1
-    local name=$2
-    local max_attempts=30
-    local retry_interval=10
-    
-    echo -e "${BLUE}Waiting for ${name} SSH to be available at ${ip}...${NC}"
-    
-    for ((attempt=1; attempt<=max_attempts; attempt++)); do
-        echo -e "${YELLOW}Attempt ${attempt}/${max_attempts}: Checking if ${name} SSH is ready at ${ip}...${NC}"
-        
-        if nc -z "${ip}" 22; then
-            echo -e "${GREEN}${name} SSH port is open at ${ip}!${NC}"
-            
-            # Wait a bit more for SSH service to fully initialize
-            sleep 10
-            
-            # Test SSH connectivity with direct IP using password authentication
-            if timeout 10 sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o PasswordAuthentication=yes ubuntu@"${ip}" "echo 'SSH is working'"; then
-                echo -e "${GREEN}${name} SSH is fully ready at ${ip}!${NC}"
-                return 0
-            else
-                echo -e "${YELLOW}Port is open but SSH not responding yet at ${ip}. Waiting...${NC}"
-            fi
-        fi
-        
-        sleep "${retry_interval}"
-    done
-    
-    echo -e "${RED}Failed to connect to ${name} SSH at ${ip} after ${max_attempts} attempts.${NC}"
-    return 1
-}
-
 # Function to wait for SSH to be available - USED ONLY FOR INITIAL SETUP
 wait_for_ssh() {
     local host=$1
@@ -418,103 +471,45 @@ wait_for_ssh() {
     echo -e "${RED}Failed to connect to ${name} SSH after ${max_attempts} attempts.${NC}"
     return 1
 }
-
-# Function to start VMs with bridge networking
-start_vms_with_bridge() {
-    echo -e "${BLUE}PHASE 4: Starting VMs with bridge networking${NC}"
+# Function to wait for SSH to be available - DIRECT IP VERSION
+wait_for_ssh_direct() {
+    local ip=$1
+    local name=$2
+    local max_attempts=60  # Increased attempts
+    local retry_interval=5   # Decreased interval
     
-    # Locate qemu-bridge-helper
-    if [ -z "$QEMU_BRIDGE_HELPER" ]; then
-        QEMU_BRIDGE_HELPER=$(which qemu-bridge-helper 2>/dev/null || echo "/usr/lib/qemu/qemu-bridge-helper")
-        if [ ! -f "$QEMU_BRIDGE_HELPER" ]; then
-            # Try to find it in other common locations
-            for path in /usr/libexec/qemu-bridge-helper /usr/local/libexec/qemu-bridge-helper; do
-                if [ -f "$path" ]; then
-                    QEMU_BRIDGE_HELPER="$path"
-                    break
+    echo -e "${BLUE}Waiting for ${name} SSH to be available at ${ip}...${NC}"
+    
+    for ((attempt=1; attempt<=max_attempts; attempt++)); do
+        echo -e "${YELLOW}Attempt ${attempt}/${max_attempts}: Checking if ${name} SSH is ready at ${ip}...${NC}"
+        
+        # First check if we can ping the IP
+        if ping -c 1 -W 2 ${ip} >/dev/null 2>&1; then
+            echo -e "${GREEN}${name} is pingable at ${ip}${NC}"
+            
+            # Then check if SSH port is open
+            if nc -z -w 2 "${ip}" 22 2>/dev/null; then
+                echo -e "${GREEN}${name} SSH port is open at ${ip}!${NC}"
+                
+                # Test actual SSH connectivity
+                if timeout 5 sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 ubuntu@"${ip}" "echo 'SSH is working'" 2>/dev/null; then
+                    echo -e "${GREEN}${name} SSH is fully ready at ${ip}!${NC}"
+                    return 0
+                else
+                    echo -e "${YELLOW}SSH port open but service not ready yet at ${ip}${NC}"
                 fi
-            done
+            else
+                echo -e "${YELLOW}Waiting for SSH service to start on ${ip}${NC}"
+            fi
+        else
+            echo -e "${YELLOW}Waiting for ${name} to be reachable at ${ip}${NC}"
         fi
-    fi
+        
+        sleep "${retry_interval}"
+    done
     
-    echo -e "${BLUE}Using QEMU bridge helper: ${QEMU_BRIDGE_HELPER}${NC}"
-    
-    # Create VM1 script
-    VM1_BRIDGE_SCRIPT="${TMP_DIR}/vm1_bridge_${SESSION_ID}.sh"
-    cat > "${VM1_BRIDGE_SCRIPT}" <<EOF
-#!/bin/bash
-echo "Starting VM1 with bridge networking..."
-
-# Set environment variable for QEMU bridge helper
-export QEMU_BRIDGE_HELPER=${QEMU_BRIDGE_HELPER}
-export QEMU_AUDIO_DRV=none
-
-# Debug info
-echo "Using bridge: ${BRIDGE_NAME}"
-echo "Bridge helper: \$QEMU_BRIDGE_HELPER"
-ls -la \$QEMU_BRIDGE_HELPER
-
-exec qemu-system-x86_64 -m 4096 -smp 4 \\
-    -enable-kvm \\
-    -cpu host \\
-    -drive file="${TEMP_DISK1}",format=qcow2 \\
-    -netdev bridge,br=${BRIDGE_NAME},id=net0,helper=\$QEMU_BRIDGE_HELPER \\
-    -device virtio-net-pci,netdev=net0,mac=${VM1_MAC} \\
-    -netdev user,id=net1 \\
-    -device virtio-net-pci,netdev=net1 \\
-    -nographic \\
-    -serial mon:stdio
-EOF
-    chmod +x "${VM1_BRIDGE_SCRIPT}"
-    
-    # Create VM2 script
-    VM2_BRIDGE_SCRIPT="${TMP_DIR}/vm2_bridge_${SESSION_ID}.sh"
-    cat > "${VM2_BRIDGE_SCRIPT}" <<EOF
-#!/bin/bash
-echo "Starting VM2 with bridge networking..."
-
-# Set environment variable for QEMU bridge helper
-export QEMU_BRIDGE_HELPER=${QEMU_BRIDGE_HELPER}
-export QEMU_AUDIO_DRV=none
-
-# Debug info
-echo "Using bridge: ${BRIDGE_NAME}"
-echo "Bridge helper: \$QEMU_BRIDGE_HELPER"
-ls -la \$QEMU_BRIDGE_HELPER
-
-exec qemu-system-x86_64 -m 4096 -smp 4 \\
-    -enable-kvm \\
-    -cpu host \\
-    -drive file="${TEMP_DISK2}",format=qcow2 \\
-    -netdev bridge,br=${BRIDGE_NAME},id=net0,helper=\$QEMU_BRIDGE_HELPER \\
-    -device virtio-net-pci,netdev=net0,mac=${VM2_MAC} \\
-    -netdev user,id=net1 \\
-    -device virtio-net-pci,netdev=net1 \\
-    -nographic \\
-    -serial mon:stdio
-EOF
-    chmod +x "${VM2_BRIDGE_SCRIPT}"
-    
-    # Start VMs
-    echo -e "${BLUE}Starting VM1 with bridge networking...${NC}"
-    xterm -title "VM1 Console" -e "${VM1_BRIDGE_SCRIPT}" &
-    
-    echo -e "${BLUE}Starting VM2 with bridge networking...${NC}"
-    xterm -title "VM2 Console" -e "${VM2_BRIDGE_SCRIPT}" &
-    
-    # Wait for VMs to boot
-    echo -e "${YELLOW}Waiting 30 seconds for VMs to boot with bridge networking...${NC}"
-    sleep 30
-    
-    # Debug: Check bridge status
-    echo -e "${BLUE}Bridge status after VM startup:${NC}"
-    ip addr show ${BRIDGE_NAME}
-    brctl show ${BRIDGE_NAME} 2>/dev/null || ip link show master ${BRIDGE_NAME}
-    
-    # Wait for SSH to be available using BRIDGE IPs, not localhost
-    echo -e "${BLUE}Waiting for VM SSH to be available after restart...${NC}"
-    wait_for_ssh_direct "${VM1_IP}" "VM1"
-    wait_for_ssh_direct "${VM2_IP}" "VM2"
+    echo -e "${RED}Failed to connect to ${name} SSH at ${ip} after ${max_attempts} attempts.${NC}"
+    return 1
 }
 
 # IMPORTANT: Function to connect to VMs using DIRECT IPs, not localhost port forwarding
@@ -640,7 +635,7 @@ SAVED_IMAGE="${VM_DIR}/saved-ubuntu-vm.qcow2"
 CLOUD_INIT_DIR="${VM_DIR}/cloud-init"
 VM_USERNAME="ubuntu"
 VM_PASSWORD="ubuntu"
-BRIDGE_NAME="qemubr0"
+BRIDGE_NAME="vswitch0"  # Changed to virtual switch name
 TMP_DIR="${VM_DIR}/tmp"
 
 # VM networking info
@@ -691,21 +686,31 @@ echo -e "${BLUE}Creating temporary session disk for VM2...${NC}"
 qemu-img create -f qcow2 -F qcow2 -b "${TMP_BOOT_IMAGE2}" "${TEMP_DISK2}" 30G
 
 # PHASE 1: Start VMs with user networking only
-start_vms_with_user_networking
-
-# PHASE 2: Configure network in each VM
-echo -e "${BLUE}PHASE 2: Configuring network in each VM${NC}"
-configure_network 2222 "VM1" "${VM1_IP}" "vm2" "${VM2_IP}"
-configure_network 2223 "VM2" "${VM2_IP}" "vm1" "${VM1_IP}"
-
-# Stop VMs to prepare for bridge networking
-echo -e "${BLUE}Shutting down VMs to prepare for bridge networking...${NC}"
-sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no -p 2222 ubuntu@localhost "sudo poweroff" || echo "VM1 may already be shutting down"
-sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no -p 2223 ubuntu@localhost "sudo poweroff" || echo "VM2 may already be shutting down"
-
-# Wait for VMs to shut down
-echo -e "${BLUE}Waiting for VMs to shut down...${NC}"
-sleep 30
+if start_vms_with_user_networking; then
+    # PHASE 2: Configure network in each VM
+    echo -e "${BLUE}PHASE 2: Configuring network in each VM${NC}"
+    configure_network 2222 "VM1" "${VM1_IP}" "vm2" "${VM2_IP}"
+    configure_network 2223 "VM2" "${VM2_IP}" "vm1" "${VM1_IP}"
+    
+    # Stop VMs to prepare for bridge networking
+    echo -e "${BLUE}Shutting down VMs to prepare for bridge networking...${NC}"
+    sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no -p 2222 ubuntu@localhost "sudo poweroff" || echo "VM1 may already be shutting down"
+    sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no -p 2223 ubuntu@localhost "sudo poweroff" || echo "VM2 may already be shutting down"
+    
+    # Wait for VMs to shut down
+    echo -e "${BLUE}Waiting for VMs to shut down...${NC}"
+    sleep 30
+else
+    # Skip configuration and shutdown phases if VMs didn't start properly
+    echo -e "${YELLOW}Skipping configuration phase due to VM startup issues.${NC}"
+    echo -e "${YELLOW}Proceeding directly to virtual switch setup.${NC}"
+    
+    # Kill any running VMs to be safe
+    echo -e "${YELLOW}Cleaning up any running VM processes...${NC}"
+    pkill -f "qemu.*${TEMP_DISK1}" || true
+    pkill -f "qemu.*${TEMP_DISK2}" || true
+    sleep 10
+fi
 
 # PHASE 3: Setup bridge network
 echo -e "${BLUE}PHASE 3: Setting up bridge network...${NC}"
@@ -714,185 +719,17 @@ setup_bridge
 # PHASE 4: Start VMs with bridge networking
 start_vms_with_bridge
 
-# Wait for bridge networking to initialize
-echo -e "${BLUE}Waiting for VMs to boot with bridge networking...${NC}"
-sleep 60
+# PHASE 5: Proceed with testing connectivity now that VMs are up and accessible
+echo -e "${BLUE}PHASE 5: Testing connectivity between VMs${NC}"
 
-# PHASE 5: Wait for VMs to be accessible via DIRECT IPS and configure them
-echo -e "${BLUE}PHASE 5: Waiting for VMs to be accessible via direct IPs${NC}"
+echo -e "${BLUE}=== VERIFYING VM CONNECTIVITY ===${NC}"
 
-# Wait a bit more for network to settle
-sleep 30
-
-# Check if VMs have gotten IP addresses via DHCP from bridge first
-echo -e "${BLUE}Checking if VMs have received IP addresses...${NC}"
-
-# Function to check VM IP and configure if needed
-configure_vm_network_via_ssh() {
-    local vm_name=$1
-    local expected_ip=$2
-    local ssh_port=$3
-    local mac_address=$4
-    
-    echo -e "${BLUE}Configuring ${vm_name} network to use STATIC IP ${expected_ip} on interface with MAC ${mac_address}...${NC}"
-    
-    # Connect via port forwarding to configure the bridge IP
-    sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${ssh_port} ubuntu@localhost << EOF
-echo "=== CONFIGURING STATIC IP ${expected_ip} FOR ${vm_name} ==="
-
-# Get the bridge interface name using MAC address
-BRIDGE_IFACE=\$(ip -br link | grep -i "${mac_address}" | awk '{print \$1}')
-if [ -z "\$BRIDGE_IFACE" ]; then
-    echo "ERROR: Could not find network interface for MAC address ${mac_address}"
-    echo "Available interfaces:"
-    ip link
-    exit 1
-fi
-echo "Found bridge interface: \$BRIDGE_IFACE for MAC ${mac_address}"
-
-# FORCE STATIC IP CONFIGURATION
-echo "Flushing any existing IP on \$BRIDGE_IFACE..."
-sudo ip addr flush dev \$BRIDGE_IFACE
-
-echo "Adding static IP ${expected_ip}/24 to \$BRIDGE_IFACE..."
-sudo ip addr add ${expected_ip}/24 dev \$BRIDGE_IFACE
-
-echo "Bringing interface \$BRIDGE_IFACE up..."
-sudo ip link set \$BRIDGE_IFACE up
-
-# Remove all existing default routes and add our bridge route
-echo "Configuring routing..."
-sudo ip route del default 2>/dev/null || true
-sudo ip route add default via 192.168.7.1 dev \$BRIDGE_IFACE
-
-# FORCE DNS CONFIGURATION - Make it permanent
-echo "=== CONFIGURING DNS ==="
-sudo rm -f /etc/resolv.conf
-
-# Create new resolv.conf with static DNS
-sudo tee /etc/resolv.conf << RESOLV
-nameserver 8.8.8.8
-nameserver 8.8.4.4
-nameserver 192.168.7.1
-search local
-RESOLV
-
-# Make it immutable to prevent overwrites
-sudo chattr +i /etc/resolv.conf 2>/dev/null || true
-
-# Disable systemd-resolved to prevent DNS conflicts
-sudo systemctl stop systemd-resolved 2>/dev/null || true
-sudo systemctl disable systemd-resolved 2>/dev/null || true
-
-# Configure SSH for password authentication
-echo "=== CONFIGURING SSH ==="
-sudo sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-sudo sed -i 's/#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-sudo sed -i 's/#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-sudo systemctl restart ssh
-
-# Add hosts entries for inter-VM communication
-echo "=== CONFIGURING HOSTS FILE ==="
-sudo tee -a /etc/hosts << HOSTS
-192.168.7.1 bridge-host gateway
-192.168.7.10 vm1
-192.168.7.11 vm2
-${expected_ip} ${vm_name}
-HOSTS
-
-# Verify network configuration
-echo "=== NETWORK VERIFICATION ==="
-ip addr show \$BRIDGE_IFACE
-ip route show
-
-echo "=== CONNECTIVITY TESTS ==="
-echo "Testing bridge gateway..."
-if ping -c 2 192.168.7.1; then
-    echo "✓ Bridge gateway reachable"
-else
-    echo "✗ Bridge gateway NOT reachable"
-fi
-
-echo "Testing internet connectivity..."
-if ping -c 2 8.8.8.8; then
-    echo "✓ Internet reachable"
-else
-    echo "✗ Internet NOT reachable"
-fi
-
-echo "Testing DNS resolution..."
-if nslookup google.com; then
-    echo "✓ DNS resolution working"
-else
-    echo "✗ DNS resolution FAILED"
-fi
-
-echo "=== CONFIGURATION COMPLETE ==="
-echo "VM: ${vm_name}"
-echo "IP: ${expected_ip}/24"
-echo "Gateway: 192.168.7.1"
-echo "Interface: \$BRIDGE_IFACE"
-EOF
-    
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✓ Successfully configured ${vm_name} with static IP ${expected_ip}${NC}"
-        return 0
-    else
-        echo -e "${RED}✗ Failed to configure ${vm_name} network${NC}"
-        return 1
-    fi
-}
-
-# Configure VM networks via existing SSH port forwarding with STATIC IPs
-echo -e "${BLUE}=== CONFIGURING STATIC IPs VIA SSH ===${NC}"
-
-# Wait a bit for SSH to be ready
-sleep 15
-
-# Configure VM1 with static IP
-if nc -z localhost 2222; then
-    echo -e "${GREEN}VM1 SSH port available via localhost:2222${NC}"
-    configure_vm_network_via_ssh "VM1" "${VM1_IP}" "2222" "${VM1_MAC}"
-else
-    echo -e "${RED}ERROR: Port 2222 not available for VM1 configuration${NC}"
-    exit 1
-fi
-
-# Configure VM2 with static IP
-if nc -z localhost 2223; then
-    echo -e "${GREEN}VM2 SSH port available via localhost:2223${NC}"
-    configure_vm_network_via_ssh "VM2" "${VM2_IP}" "2223" "${VM2_MAC}"  
-else
-    echo -e "${RED}ERROR: Port 2223 not available for VM2 configuration${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}=== STATIC IP CONFIGURATION COMPLETE ===${NC}"
-
-# Verify the VMs now have their static IPs
-echo -e "${BLUE}=== VERIFYING STATIC IP ASSIGNMENT ===${NC}"
-for ip in ${VM1_IP} ${VM2_IP}; do
-    echo -e "${YELLOW}Testing connectivity to ${ip}...${NC}"
-    if ping -c 2 -W 3 ${ip} >/dev/null 2>&1; then
-        echo -e "${GREEN}✓ ${ip} is reachable${NC}"
-    else
-        echo -e "${RED}✗ ${ip} is NOT reachable${NC}"
-    fi
-done
-
-# Now wait for SSH using DIRECT STATIC IP ADDRESSES
-echo -e "${BLUE}=== WAITING FOR SSH VIA STATIC IPs ===${NC}"
-
-# Use the static IPs we just configured
+# The VMs should be accessible with their configured static IPs
 FINAL_VM1_IP="${VM1_IP}"
 FINAL_VM2_IP="${VM2_IP}"
 
-echo -e "${BLUE}VM1 Static IP: ${FINAL_VM1_IP}${NC}"
-echo -e "${BLUE}VM2 Static IP: ${FINAL_VM2_IP}${NC}"
-
-# Wait for SSH to be available on static IPs
-wait_for_ssh_direct "${FINAL_VM1_IP}" "VM1"
-wait_for_ssh_direct "${FINAL_VM2_IP}" "VM2"
+echo -e "${BLUE}VM1 IP: ${FINAL_VM1_IP}${NC}"
+echo -e "${BLUE}VM2 IP: ${FINAL_VM2_IP}${NC}"
 
 # Test connectivity between VMs using direct IPs
 test_direct_connectivity
@@ -913,19 +750,52 @@ echo -e "${GREEN}VM1: ${FINAL_VM1_IP}${NC}"
 echo -e "${GREEN}VM2: ${FINAL_VM2_IP}${NC}"
 echo -e "${GREEN}=========================================${NC}"
 
-echo -e "${BLUE}Starting SSH session to VM1 using direct bridge IP...${NC}"
-sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@${FINAL_VM1_IP}
-
-echo -e "${YELLOW}Do you want to connect to VM2? (y/n)${NC}"
+# Ask if user wants to connect to VMs or shut them down immediately
+echo -e "${YELLOW}Do you want to connect to the VMs before shutting them down? (y/n)${NC}"
 read -r response
 if [[ "$response" =~ ^[Yy]$ ]]; then
-    echo -e "${BLUE}Starting SSH session to VM2 using direct bridge IP...${NC}"
-    sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@${FINAL_VM2_IP}
+    echo -e "${BLUE}Starting SSH session to VM1 using direct bridge IP...${NC}"
+    sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@${FINAL_VM1_IP}
+    
+    echo -e "${YELLOW}Do you want to connect to VM2? (y/n)${NC}"
+    read -r response2
+    if [[ "$response2" =~ ^[Yy]$ ]]; then
+        echo -e "${BLUE}Starting SSH session to VM2 using direct bridge IP...${NC}"
+        sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@${FINAL_VM2_IP}
+    fi
+    
+    echo -e "${BLUE}SSH sessions completed. Proceeding to shut down VMs.${NC}"
 fi
 
-echo -e "${BLUE}VMs are running in separate windows.${NC}"
-echo -e "${YELLOW}When finished, type 'poweroff' in the VMs or close the VM windows.${NC}"
-echo -e "${YELLOW}This console will remain available. Press Ctrl+C to exit this script.${NC}"
+# Add a function to gracefully shut down VMs via SSH
+shutdown_vms() {
+    echo -e "${BLUE}Shutting down VMs...${NC}"
+    
+    # Shut down VM1
+    echo -e "${YELLOW}Shutting down VM1 at ${FINAL_VM1_IP}...${NC}"
+    if ping -c 1 -W 2 ${FINAL_VM1_IP} > /dev/null 2>&1; then
+        sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@${FINAL_VM1_IP} "sudo poweroff" || echo "VM1 may already be shutting down"
+        echo -e "${GREEN}VM1 shutdown initiated.${NC}"
+    else
+        echo -e "${RED}Cannot reach VM1 to shut down properly.${NC}"
+    fi
+    
+    # Shut down VM2
+    echo -e "${YELLOW}Shutting down VM2 at ${FINAL_VM2_IP}...${NC}"
+    if ping -c 1 -W 2 ${FINAL_VM2_IP} > /dev/null 2>&1; then
+        sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@${FINAL_VM2_IP} "sudo poweroff" || echo "VM2 may already be shutting down"
+        echo -e "${GREEN}VM2 shutdown initiated.${NC}"
+    else
+        echo -e "${RED}Cannot reach VM2 to shut down properly.${NC}"
+    fi
+    
+    # Wait for VMs to shut down
+    echo -e "${BLUE}Waiting for VMs to shut down...${NC}"
+    sleep 30
+}
+
+# Shut down VMs automatically
+shutdown_vms
 
 # Wait for VMs to shutdown
 echo -e "${BLUE}Monitoring VM processes...${NC}"
@@ -934,3 +804,4 @@ while pgrep -f "qemu-system.*${SESSION_ID}" > /dev/null; do
 done
 
 echo -e "${GREEN}All VMs have been shut down.${NC}"
+echo -e "${GREEN}Script execution completed successfully.${NC}"

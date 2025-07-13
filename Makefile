@@ -436,19 +436,57 @@ download-prebuilt-image: ## 📥 Download a pre-built Slurm image (everything in
 	@chmod +x ./direct-image.sh
 	@./direct-image.sh
 
-qemu-create: ## 🔄 Create cluster VMs from pre-built image
-	@echo "$(BLUE)[INFO]$(NC) Creating VMs from pre-built image..."
-	@chmod +x $(QEMU_SCRIPT)
-	@$(QEMU_SCRIPT) create
+## 🖥️ QEMU Cluster Management
 
-qemu-start-all: ## ▶️ Start all cluster VMs
-	@echo "$(BLUE)[INFO]$(NC) Starting all VMs..."
-	@chmod +x $(QEMU_SCRIPT)
-	@$(QEMU_SCRIPT) start-all
+q-cluster: setup-repos ## 🚀 Build and start QEMU-based Slurm cluster
+	@echo "$(BLUE)[INFO]$(NC) Building QEMU-based Slurm cluster..."
+	@chmod +x ./qemu-cluster-build.sh
+	@./qemu-cluster-build.sh build
+	@echo "$(GREEN)[SUCCESS]$(NC) QEMU cluster is ready!"
+	@echo "$(BOLD)Access the cluster:$(NC)"
+	@echo "  Controller: ssh ubuntu@192.168.7.10"
+	@echo "  Node1: ssh ubuntu@192.168.7.11"  
+	@echo "  Node2: ssh ubuntu@192.168.7.12"
+	@echo "  Password: ubuntu"
 
-qemu-instant-cluster: download-prebuilt-image qemu-create qemu-start-all ## 🚀 Instant cluster setup with pre-built image
-	@echo "$(GREEN)[SUCCESS]$(NC) Cluster is ready from pre-built image!"
-	@echo "$(BOLD)Next steps:$(NC)"
-	@echo "  - Connect to the controller: $(BOLD)make qemu-connect$(NC)"
-	@echo "  - Run sample jobs: $(BOLD)make test-qemu$(NC)"
-	@echo "  - Check cluster status: $(BOLD)make qemu-status$(NC)"
+q-cluster-start: ## ▶️ Start existing QEMU cluster VMs
+	@echo "$(BLUE)[INFO]$(NC) Starting QEMU cluster VMs..."
+	@chmod +x ./qemu-cluster-build.sh
+	@./qemu-cluster-build.sh start
+
+q-cluster-stop: ## ⏹️ Stop running QEMU cluster VMs
+	@echo "$(YELLOW)[INFO]$(NC) Stopping QEMU cluster VMs..."
+	@chmod +x ./qemu-cluster-build.sh
+	@./qemu-cluster-build.sh stop
+
+q-cluster-clean: ## 🧹 Clean up QEMU cluster (remove VMs but keep base image)
+	@echo "$(YELLOW)[INFO]$(NC) Cleaning up QEMU cluster..."
+	@chmod +x ./qemu-cluster-build.sh
+	@./qemu-cluster-build.sh clean
+	@echo "$(GREEN)[SUCCESS]$(NC) QEMU cluster cleaned up."
+
+q-cluster-clean-all: ## 🗑️ Clean up everything including base image
+	@echo "$(YELLOW)[INFO]$(NC) Cleaning up QEMU cluster and base image..."
+	@chmod +x ./qemu-cluster-build.sh
+	@./qemu-cluster-build.sh clean-all
+	@echo "$(GREEN)[SUCCESS]$(NC) All QEMU cluster files removed."
+
+q-cluster-status: ## 📊 Check QEMU cluster status
+	@echo "$(BLUE)[INFO]$(NC) QEMU Cluster Status:"
+	@echo "$(BLUE)Virtual Switch:$(NC)"
+	@sudo ovs-vsctl show 2>/dev/null || echo "  No virtual switch found"
+	@echo ""
+	@echo "$(BLUE)Running VMs:$(NC)"
+	@ps aux | grep -E "qemu.*slurm-(controller|node)" | grep -v grep || echo "  No cluster VMs running"
+	@echo ""
+	@echo "$(BLUE)VM Images:$(NC)"
+	@ls -lh qemu-vms/slurm-*.qcow2 2>/dev/null || echo "  No cluster images found"
+
+q-cluster-connect: ## 🔌 SSH to QEMU cluster controller
+	@echo "$(BLUE)[INFO]$(NC) Connecting to QEMU cluster controller..."
+	@ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10
+
+q-cluster-test: ## 🧪 Run tests on QEMU cluster
+	@echo "$(BLUE)[INFO]$(NC) Running tests on QEMU cluster..."
+	@ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "cd ~/sample-jobs && for job in *.sh; do echo 'Submitting $$job'; sbatch $$job; done"
+	@echo "$(GREEN)[SUCCESS]$(NC) All test jobs submitted."

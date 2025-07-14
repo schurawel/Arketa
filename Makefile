@@ -5,9 +5,10 @@
 .PHONY: test-hello test-parallel test-stress test-array show-outputs wait-for-jobs test-and-wait
 .PHONY: test-python test-apptainer test-ml test-distributed test-extended test-mpi
 .PHONY: show-job-output show-all-outputs show-latest-outputs
-.PHONY: ondemand slurm-web
+.PHONY: ondemand slurm-web open-ondemand open-slurm-web
 .PHONY: build-vagrant build-base remove-base list-boxes preflight setup-repos
 .PHONY: metal sim-metal sim-metal-status sim-metal-stop sim-metal-clean sim-metal-connect metal-clean
+.PHONY: q-cluster-refresh-samples
 
 # Default target
 .DEFAULT_GOAL := help
@@ -303,13 +304,43 @@ clean: ## 🗑️ Clean up the cluster environment
 
 ondemand: ## 🌐 Start Open OnDemand service
 	@echo "$(BLUE)[INFO]$(NC) Ensuring Open OnDemand is set up..."
-	@echo "$(GREEN)[SUCCESS]$(NC) Open OnDemand is running. Access at http://localhost/"
-	@xdg-open http://localhost/ 2>/dev/null || echo "Open http://localhost/ in your browser."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo systemctl status apache2 | grep Active" || \
+		(echo "$(YELLOW)[WARNING]$(NC) Open OnDemand service not running on controller"; \
+		echo "$(BLUE)[INFO]$(NC) Attempting to start Open OnDemand service..."; \
+		sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo systemctl start apache2" || true)
+	@echo "$(GREEN)[SUCCESS]$(NC) Open OnDemand is running. Access at http://192.168.7.10/"
+	@xdg-open http://192.168.7.10/ 2>/dev/null || echo "$(BLUE)[INFO]$(NC) Open http://192.168.7.10/ in your browser."
+
+open-ondemand: ## 🌐 Open the OnDemand web interface in browser
+	@echo "$(BLUE)[INFO]$(NC) Opening OnDemand web interface..."
+	@if ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
+		echo "$(GREEN)[SUCCESS]$(NC) Controller VM is reachable at 192.168.7.10"; \
+		xdg-open http://192.168.7.10/ 2>/dev/null || \
+			echo "$(YELLOW)[WARNING]$(NC) Please open http://192.168.7.10/ in your browser"; \
+	else \
+		echo "$(RED)[ERROR]$(NC) Cannot reach controller VM at 192.168.7.10"; \
+		echo "$(YELLOW)[TIP]$(NC) Make sure the QEMU cluster is running with: make q-cluster"; \
+	fi
 
 slurm-web: ## 🌐 Start slurm-web service
 	@echo "$(BLUE)[INFO]$(NC) Ensuring slurm-web is set up..."
-	@echo "$(GREEN)[SUCCESS]$(NC) slurm-web is running. Access at http://localhost:5011"
-	@xdg-open http://localhost:5011 2>/dev/null || echo "Open http://localhost:5011 in your browser."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo systemctl status slurm-web-gateway | grep Active" || \
+		(echo "$(YELLOW)[WARNING]$(NC) slurm-web service not running on controller"; \
+		echo "$(BLUE)[INFO]$(NC) Attempting to start slurm-web service..."; \
+		sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo systemctl start slurm-web-gateway" || true)
+	@echo "$(GREEN)[SUCCESS]$(NC) slurm-web is running. Access at http://192.168.7.10:5011"
+	@xdg-open http://192.168.7.10:5011 2>/dev/null || echo "$(BLUE)[INFO]$(NC) Open http://192.168.7.10:5011 in your browser."
+
+open-slurm-web: ## 🌐 Open the Slurm web interface in browser
+	@echo "$(BLUE)[INFO]$(NC) Opening Slurm web interface..."
+	@if ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
+		echo "$(GREEN)[SUCCESS]$(NC) Controller VM is reachable at 192.168.7.10"; \
+		xdg-open http://192.168.7.10:5011 2>/dev/null || \
+			echo "$(YELLOW)[WARNING]$(NC) Please open http://192.168.7.10:5011 in your browser"; \
+	else \
+		echo "$(RED)[ERROR]$(NC) Cannot reach controller VM at 192.168.7.10"; \
+		echo "$(YELLOW)[TIP]$(NC) Make sure the QEMU cluster is running with: make q-cluster"; \
+	fi
 
 ## 📜 Job Testing Targets
 
@@ -514,10 +545,39 @@ q-cluster-test: ## 🧪 Run test jobs on the QEMU cluster
 		echo "$(YELLOW)[WARNING]$(NC) Not all jobs completed within the timeout period."; \
 		echo "$(BLUE)[INFO]$(NC) Current job status:"; \
 		sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "squeue"; \
-		echo "$(BLUE)[INFO]$(NC) You can check status later with: ssh ubuntu@192.168.7.10 squeue"; \
 	}
-	@echo "$(BLUE)[INFO]$(NC) Job results (completed jobs only):"
-	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "find ~/ -name \"slurm-*.out\" -type f -exec ls -la {} \; && echo \"Recent job outputs:\" && find ~/ -name \"slurm-*.out\" -type f -exec cat {} \;"
+	@echo "$(BLUE)[INFO]$(NC) Displaying job output files from ~/sample-jobs directory..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "cd ~/sample-jobs && ls -la *.out *.err 2>/dev/null || echo 'No output files found'"
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 'cd ~/sample-jobs && for file in $$(ls *.out *.err 2>/dev/null); do \
+		echo "------------------------------------------------------------"; \
+		echo "FILE: $$file"; \
+		echo "------------------------------------------------------------"; \
+		cat "$$file"; \
+		echo ""; \
+	done || echo "$(YELLOW)[WARNING]$(NC) No output files found in ~/sample-jobs"'
 	@echo "$(GREEN)[SUCCESS]$(NC) Sample jobs have been submitted to the QEMU cluster."
 	@echo "$(BLUE)[INFO]$(NC) To check job status: ssh ubuntu@192.168.7.10 squeue"
-	@echo "$(BLUE)[INFO]$(NC) To view job outputs: ssh ubuntu@192.168.7.10 \"cat slurm-*.out\""
+	@echo "$(BLUE)[INFO]$(NC) To view job outputs: ssh ubuntu@192.168.7.10 \"cd ~/sample-jobs && cat *.out\""
+
+q-cluster-refresh-samples: ## 🔄 Refresh sample jobs on QEMU cluster controller
+	@echo "$(BLUE)[INFO]$(NC) Refreshing sample jobs on QEMU cluster controller..."
+	@echo "$(BLUE)[INFO]$(NC) Checking controller VM connectivity..."
+	@if ! ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
+		echo "$(RED)[ERROR]$(NC) Cannot ping controller at 192.168.7.10. Is the cluster running?"; \
+		echo "$(YELLOW)[TIP]$(NC) Start cluster with: make q-cluster"; \
+		exit 1; \
+	fi
+	@echo "$(BLUE)[INFO]$(NC) Removing old sample jobs from controller VM..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "rm -rf ~/sample-jobs" || { \
+		echo "$(RED)[ERROR]$(NC) Failed to remove old sample jobs from controller VM"; \
+		exit 1; \
+	}
+	@echo "$(BLUE)[INFO]$(NC) Copying fresh sample jobs to controller VM..."
+	@sshpass -p "ubuntu" scp -o StrictHostKeyChecking=no -r ./sample-jobs/* ubuntu@192.168.7.10:~/sample-jobs/ || { \
+		echo "$(RED)[ERROR]$(NC) Failed to copy sample jobs to controller VM"; \
+		exit 1; \
+	}
+	@echo "$(BLUE)[INFO]$(NC) Setting execute permissions on job scripts..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "cd ~/sample-jobs && chmod +x *.sh"
+	@echo "$(GREEN)[SUCCESS]$(NC) Sample jobs have been refreshed on the QEMU cluster controller."
+	@echo "$(BLUE)[INFO]$(NC) Submit jobs with: ssh ubuntu@192.168.7.10 \"cd ~/sample-jobs && sbatch <job-script.sh>\""

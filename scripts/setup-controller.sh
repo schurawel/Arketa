@@ -299,9 +299,20 @@ fi
 echo "🌐 Setting up Open OnDemand..."
 if [ -f /home/ubuntu/scripts/setup-ondemand.sh ]; then
   chmod +x /home/ubuntu/scripts/setup-ondemand.sh
-  /home/ubuntu/scripts/setup-ondemand.sh
-  echo "✅ Open OnDemand setup complete."
-  echo "👉 Access the portal at http://localhost:8080"
+  /home/ubuntu/scripts/setup-ondemand.sh || {
+    echo "⚠️ OnDemand setup encountered issues. Checking status..."
+    systemctl status apache2 --no-pager || true
+    echo "📋 Apache sites enabled:"
+    ls -la /etc/apache2/sites-enabled/ || true
+  }
+  echo "✅ Open OnDemand setup attempt complete."
+  echo "👉 Access the portal at http://192.168.7.10/"
+  echo "👤 Login: ooduser / ooduser"
+elif [ -f /home/vagrant/scripts/setup-ondemand.sh ]; then
+  chmod +x /home/vagrant/scripts/setup-ondemand.sh
+  /home/vagrant/scripts/setup-ondemand.sh || {
+    echo "⚠️ OnDemand setup encountered issues."
+  }
 else
   echo "🤷 Skipping Open OnDemand setup: script not found."
 fi
@@ -312,7 +323,7 @@ if [ -f /home/ubuntu/scripts/setup-slurm-web.sh ]; then
   chmod +x /home/ubuntu/scripts/setup-slurm-web.sh
   /home/ubuntu/scripts/setup-slurm-web.sh
   echo "✅ slurm-web setup complete."
-  echo "👉 Access the portal at http://localhost:8081"
+  echo "👉 Access the portal at http://192.168.7.10:5011"
 else
   echo "🤷 Skipping slurm-web setup: script not found."
 fi

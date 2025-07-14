@@ -315,214 +315,69 @@ open-ondemand: ## 🌐 Open the OnDemand web interface in browser
 	@echo "$(BLUE)[INFO]$(NC) Opening OnDemand web interface..."
 	@if ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
 		echo "$(GREEN)[SUCCESS]$(NC) Controller VM is reachable at 192.168.7.10"; \
-		xdg-open http://192.168.7.10/ 2>/dev/null || echo "$(BLUE)[INFO]$(NC) Open http://192.168.7.10/ in your browser"; \
-	else \
-		echo "$(RED)[ERROR]$(NC) Cannot reach controller VM at 192.168.7.10"; \
-		echo "$(YELLOW)[TIP]$(NC) Make sure the QEMU cluster is running with: make q-cluster"; \
-	fi
-
-slurm-web: ## 🌐 Start slurm-web service
-	@echo "$(BLUE)[INFO]$(NC) Ensuring slurm-web is set up..."
-	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo systemctl status slurm-web-gateway | grep Active" || \
-		(echo "$(YELLOW)[WARNING]$(NC) slurm-web service not running on controller"; \
-		echo "$(BLUE)[INFO]$(NC) Attempting to start slurm-web service..."; \
-		sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo systemctl start slurm-web-gateway" || true)
-	@echo "$(GREEN)[SUCCESS]$(NC) slurm-web is running. Access at http://192.168.7.10:5011"
-	@xdg-open http://192.168.7.10:5011 2>/dev/null || echo "$(BLUE)[INFO]$(NC) Open http://192.168.7.10:5011 in your browser."
-
-open-slurm-web: ## 🌐 Open the Slurm web interface in browser
-	@echo "$(BLUE)[INFO]$(NC) Opening Slurm web interface..."
-	@if ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
-		echo "$(GREEN)[SUCCESS]$(NC) Controller VM is reachable at 192.168.7.10"; \
-		echo "$(BLUE)[INFO]$(NC) Checking if slurm-web service is accessible..."; \
-		if curl -s --head --connect-timeout 3 --max-time 5 http://192.168.7.10:5011/ > /dev/null 2>&1; then \
-			echo "$(GREEN)[SUCCESS]$(NC) slurm-web service is responding"; \
-			xdg-open http://192.168.7.10:5011 2>/dev/null || \
-				echo "$(YELLOW)[WARNING]$(NC) Please open http://192.168.7.10:5011 in your browser"; \
+		echo "$(BLUE)[INFO]$(NC) Checking if OnDemand is properly configured..."; \
+		if sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "curl -s -u ooduser:ooduser http://localhost/ 2>&1 | grep -q 'Open OnDemand'" > /dev/null 2>&1; then \
+			echo "$(GREEN)[SUCCESS]$(NC) OnDemand portal is running properly"; \
+			echo "$(YELLOW)[INFO]$(NC) Login credentials - Username: ooduser, Password: ooduser"; \
+			xdg-open http://192.168.7.10/ 2>/dev/null || echo "$(BLUE)[INFO]$(NC) Open http://192.168.7.10/ in your browser"; \
 		else \
-			echo "$(YELLOW)[WARNING]$(NC) slurm-web service is not responding on port 5011"; \
-			echo "$(BLUE)[INFO]$(NC) Checking if slurm-web service is running..."; \
-			if sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo systemctl is-active slurm-web-gateway" > /dev/null 2>&1; then \
-				echo "$(YELLOW)[WARNING]$(NC) slurm-web service is running but not accessible. Trying to restart it..."; \
-				sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo systemctl restart slurm-web-gateway"; \
-				echo "$(BLUE)[INFO]$(NC) Please wait a moment and try again."; \
-			else \
-				echo "$(RED)[ERROR]$(NC) slurm-web service is not running"; \
-				echo "$(YELLOW)[TIP]$(NC) Start slurm-web service with: make slurm-web"; \
-				echo "$(BLUE)[INFO]$(NC) Or start it manually on the controller:"; \
-				echo "  ssh ubuntu@192.168.7.10"; \
-				echo "  sudo systemctl start slurm-web-gateway"; \
-			fi; \
+			echo "$(YELLOW)[WARNING]$(NC) OnDemand portal not responding correctly"; \
+			echo "$(BLUE)[INFO]$(NC) Running diagnostics..."; \
+			$(MAKE) ondemand-diag; \
 		fi; \
 	else \
 		echo "$(RED)[ERROR]$(NC) Cannot reach controller VM at 192.168.7.10"; \
 		echo "$(YELLOW)[TIP]$(NC) Make sure the QEMU cluster is running with: make q-cluster"; \
 	fi
 
-slurm-web-diag: ## 🔍 Diagnose and fix slurm-web connectivity issues
-	@echo "$(BLUE)[INFO]$(NC) Running slurm-web diagnostics..."
+ondemand-diag: ## 🔍 Diagnose OnDemand configuration issues
+	@echo "$(BLUE)[INFO]$(NC) Running OnDemand diagnostics..."
 	@if ! ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
 		echo "$(RED)[ERROR]$(NC) Cannot ping controller at 192.168.7.10. Is the cluster running?"; \
 		exit 1; \
 	fi
 	@echo "$(GREEN)[SUCCESS]$(NC) Controller VM is reachable"
 	
-	@echo "$(BLUE)[INFO]$(NC) Copying fix-slurm-web.sh script to controller..."
-	@sshpass -p "ubuntu" scp -o StrictHostKeyChecking=no $(CURDIR)/scripts/fix-slurm-web.sh ubuntu@192.168.7.10:/tmp/fix-slurm-web.sh || \
-		(echo "$(RED)[ERROR]$(NC) Failed to copy fix script. Creating it directly on controller..."; \
-		sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "echo '#!/bin/bash' > /tmp/fix-slurm-web.sh; \
-		echo 'sudo sed -i \"s/^host=.*/host=0.0.0.0/\" /etc/slurm-web/gateway.ini || true' >> /tmp/fix-slurm-web.sh; \
-		echo 'sudo systemctl restart slurm-web-gateway slurm-web-agent' >> /tmp/fix-slurm-web.sh; \
-		chmod +x /tmp/fix-slurm-web.sh")
+	@echo "$(BLUE)[INFO]$(NC) Checking Apache configuration..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo apache2ctl -S" || \
+		echo "$(RED)[ERROR]$(NC) Apache configuration has errors"
 	
-	@echo "$(BLUE)[INFO]$(NC) Running fix script on controller..."
-	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "chmod +x /tmp/fix-slurm-web.sh && sudo /tmp/fix-slurm-web.sh"
+	@echo "$(BLUE)[INFO]$(NC) Checking enabled Apache sites..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "ls -la /etc/apache2/sites-enabled/" || true
 	
-	@echo "$(YELLOW)[INFO]$(NC) Waiting 15 seconds for services to fully initialize..."
-	@sleep 15
+	@echo "$(BLUE)[INFO]$(NC) Checking OnDemand portal configuration..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo cat /etc/ood/config/ood_portal.yml 2>/dev/null | head -20" || \
+		echo "$(YELLOW)[WARNING]$(NC) OnDemand portal config not found"
 	
-	@echo "$(BLUE)[INFO]$(NC) Testing connectivity..."
-	@if curl -s --head --connect-timeout 5 --max-time 8 http://192.168.7.10:5011/ > /dev/null 2>&1; then \
-		echo "$(GREEN)[SUCCESS]$(NC) slurm-web service is now accessible at http://192.168.7.10:5011"; \
-		xdg-open http://192.168.7.10:5011 2>/dev/null || \
-			echo "$(YELLOW)[WARNING]$(NC) Please open http://192.168.7.10:5011 in your browser"; \
-	else \
-		echo "$(RED)[ERROR]$(NC) slurm-web service is still not accessible. See diagnostic output above for clues."; \
-		echo "$(YELLOW)[TIP]$(NC) Try manually running these commands:"; \
-		echo "  ssh ubuntu@192.168.7.10"; \
-		echo "  sudo sed -i 's/^host=.*/host=0.0.0.0/' /etc/slurm-web/gateway.ini"; \
-		echo "  sudo systemctl restart slurm-web-gateway slurm-web-agent"; \
-		echo "  sudo netstat -tulpn | grep 5011"; \
-	fi
-
-## 📜 Job Testing Targets
-
-# Helper for waiting
-define wait_for_jobs
-    @echo "$(BLUE)[INFO]$(NC) Waiting for all jobs to complete..."
-    @timeout 300s $(VAGRANT_WRAPPER) ssh controller -- "while squeue | grep -q 'vagrant'; do echo -n '.'; sleep 5; done; echo"
-    @echo "$(GREEN)[SUCCESS]$(NC) All jobs completed."
-endef
-
-test-and-wait: test ## 🧪 Run all tests and wait for completion
-	@$(call wait_for_jobs)
-	@$(MAKE) show-all-outputs
-
-test-hello: ## 👋 Submit a simple 'hello world' job
-	@echo "$(BLUE)[TEST]$(NC) Submitting Hello World job..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/hello_world.sh"
-
-test-parallel: ## 👯 Submit a simple parallel (MPI) job
-	@echo "$(BLUE)[TEST]$(NC) Submitting Parallel Hello (MPI) job..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/parallel_hello.sh"
-
-test-stress: ## 💪 Submit a CPU stress test job
-	@echo "$(BLUE)[TEST]$(NC) Submitting CPU Stress Test job..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/cpu_stress.sh"
-
-test-array: ## 🔢 Submit a job array
-	@echo "$(BLUE)[TEST]$(NC) Submitting Job Array..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/array_job.sh"
-
-test-python: ## 🐍 Submit a Python simulation job
-	@echo "$(BLUE)[TEST]$(NC) Submitting Python Simulation job..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/python_simulation.sh"
-
-test-apptainer: ## 📦 Submit an Apptainer/Singularity job
-	@echo "$(BLUE)[TEST]$(NC) Submitting Apptainer job..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/apptainer_job.sh"
-
-test-ml: ## 🧠 Submit a mock ML training job
-	@echo "$(BLUE)[TEST]$(NC) Submitting ML Simulation job..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/ml_simulation.sh"
-
-test-distributed: ## 🌐 Submit a distributed simulation job
-	@echo "$(BLUE)[TEST]$(NC) Submitting Distributed Simulation job..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/distributed_simulation.sh"
-
-test-mpi: ## 🚀 Submit a basic MPI job
-	@echo "$(BLUE)[TEST]$(NC) Submitting basic MPI job..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "sbatch /home/vagrant/sample-jobs/mpi_job.sh"
-
-test-extended: test-python test-apptainer test-ml test-distributed test-mpi ## 🧪 Run extended tests
-	@echo "$(GREEN)[SUCCESS]$(NC) All extended tests submitted."
-
-## 📄 Job Output Management
-
-show-outputs: ## 📄 Show output of a specific job (e.g., make show-outputs job_id=1)
-	@echo "$(BLUE)[INFO]$(NC) Showing output for job $(job_id)..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "cat slurm-$(job_id).out"
-
-show-job-output: ## 📄 Show output for a specific job script (e.g., make show-job-output script=hello_world.sh)
-	@job_id=`$(VAGRANT_WRAPPER) ssh controller -c "squeue -o '%A %j' | grep '$(script)' | cut -d' ' -f1"`; \
-	if [ -n "$$job_id" ]; then \
-		echo "Showing output for job $$job_id (slurm-$$job_id.out)"; \
-		$(VAGRANT_WRAPPER) ssh controller -c "cat slurm-$$job_id.out"; \
-	else \
-		echo "Could not find job for script $(script)"; \
-	fi
-
-show-all-outputs: ## 📄 Show outputs of all completed jobs
-	@echo "$(BLUE)[INFO]$(NC) Showing outputs of all completed jobs in ~/ ..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "cat ~/slurm-*.out"
-
-show-latest-outputs: ## 📄 Show the most recent job output
-	@echo "$(BLUE)[INFO]$(NC) Showing the most recent job output..."
-	@$(VAGRANT_WRAPPER) ssh controller -c "ls -t ~/slurm-*.out | head -n 1 | xargs cat"
-
-## 🛠️ Setup & Preflight
-
-setup-repos: ## 📥 Clone required source repositories
-	@echo "$(BLUE)[INFO]$(NC) Setting up required source repositories..."
-	@if [ -d "tmp/slurm" ] && [ -d "tmp/ondemand" ] && [ -d "tmp/slurm-web" ]; then \
-		echo "$(GREEN)[OK]$(NC) Repositories already exist. Skipping clone."; \
-	else \
-		./setup-repos.sh; \
-	fi
-
-preflight: ## ✅ Run preflight checks for dependencies
-	@echo "$(BLUE)[INFO]$(NC) Running preflight checks..."
-	@$(PREFLIGHT_CHECK)
-
-build-vagrant: ## 🏗️ Build the vagrant-wrapper utility
-	@if [ -x "$(VAGRANT_WRAPPER)" ]; then \
-		echo "$(BLUE)[INFO]$(NC) vagrant-wrapper.sh is executable. Skipping build."; \
-	else \
-		echo "$(RED)[ERROR]$(NC) $(VAGRANT_WRAPPER) not found or not executable."; \
-		exit 1; \
-	fi
-
-## ⚙️ Bare Metal Deployment (Advanced)
-
-metal: ## 💿 Create custom Ubuntu ISO for bare metal deployment
-	@echo "$(BLUE)[INFO]$(NC) Creating custom Ubuntu ISO for HPC deployment..."
-	@./scripts/create-metal-iso.sh
-
-sim-metal: ## 🖥️ Simulate bare metal installation with QEMU
-	@echo "$(BLUE)[INFO]$(NC) Starting bare metal simulation with QEMU..."
-	@./scripts/simulate-metal.sh start
-
-sim-metal-status: ## 📊 Check status of the QEMU simulation
-	@./scripts/simulate-metal.sh status
-
-sim-metal-stop: ## 🛑 Stop the QEMU simulation
-	@./scripts/simulate-metal.sh stop
-
-sim-metal-clean: ## 🧹 Clean up QEMU simulation files
-	@./scripts/simulate-metal.sh clean
-
-sim-metal-connect: ## 🔌 Connect to the simulated controller via VNC
-	@./qemu-workspace/connect-vnc.sh
-
-metal-clean: ## 🧹 Clean up ISO workspace and generated files
-	@echo "$(YELLOW)[INFO]$(NC) Cleaning up ISO workspace..."
-	@rm -rf iso-workspace/ubuntu-22.04-hpc-cluster.iso iso-workspace/iso-rebuild
-	@echo "$(GREEN)[SUCCESS]$(NC) ISO workspace cleaned."
-
-download-prebuilt-image: ## 📥 Download a pre-built Slurm image (everything installed)
-	@echo "$(BLUE)[INFO]$(NC) Downloading pre-built Slurm image with everything installed..."
-	@chmod +x ./direct-image.sh
-	@./direct-image.sh
+	@echo "$(BLUE)[INFO]$(NC) Attempting to fix OnDemand configuration..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 << 'EOF'
+		# Disable default site if enabled
+		sudo a2dissite 000-default 2>/dev/null || true
+		
+		# Enable OnDemand portal
+		sudo a2ensite ood-portal 2>/dev/null || {
+			echo "ERROR: ood-portal site not found. OnDemand may not be installed correctly."
+			echo "Try running: sudo /home/ubuntu/scripts/setup-ondemand.sh"
+			exit 1
+		}
+		
+		# Restart Apache
+		sudo systemctl restart apache2
+		
+		echo "Waiting for Apache to restart..."
+		sleep 5
+		
+		# Test if OnDemand is now accessible
+		if curl -s -u ooduser:ooduser http://localhost/ 2>&1 | grep -q "Open OnDemand"; then
+			echo "✅ OnDemand is now accessible!"
+		else
+			echo "⚠️ OnDemand still not responding. Checking Apache error log..."
+			sudo tail -20 /var/log/apache2/error.log
+		fi
+	EOF
+	
+	@echo "$(BLUE)[INFO]$(NC) Diagnostics complete. Try accessing http://192.168.7.10/ again."
+	@echo "$(YELLOW)[INFO]$(NC) Default credentials - Username: ooduser, Password: ooduser"
 
 ## 🖥️ QEMU Cluster Management
 

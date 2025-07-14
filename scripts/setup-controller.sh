@@ -21,7 +21,12 @@ apt-get install -y nfs-kernel-server
 # Setup shared directory
 mkdir -p /shared
 chown slurm:slurm /shared
-chmod 755 /shared
+chmod 777 /shared  # Make shared directory world-writable to avoid permission issues with MPI jobs
+
+# Create required subdirectories with proper permissions
+mkdir -p /shared/mpi-jobs
+chmod 777 /shared/mpi-jobs
+chown slurm:slurm /shared/mpi-jobs
 
 # Configure NFS export for shared directory - FIXED NETWORK ADDRESS
 grep -q "/shared 192.168.7.0/24" /etc/exports || echo "/shared 192.168.7.0/24(rw,sync,no_subtree_check,no_root_squash)" > /etc/exports
@@ -243,6 +248,51 @@ elif [ -f "/home/vagrant/scripts/setup-slurmdbd.sh" ]; then
 else
     echo "ERROR: setup-slurmdbd.sh script not found in expected locations"
     exit 1
+fi
+
+# Setup and start slurmrestd
+echo "🚀 Setting up slurmrestd service..."
+
+# Check if slurmrestd binary exists
+if [ ! -f /opt/slurm/sbin/slurmrestd ]; then
+    echo "❌ slurmrestd binary not found. Slurm may not have been built with REST API support."
+    echo "⚠️ Continuing without slurmrestd..."
+else
+    echo "✅ Found slurmrestd binary"
+    
+    # Create slurmrestd service file
+    cat <<'EOF' | sudo tee /etc/systemd/system/slurmrestd.service
+[Unit]
+Description=Slurm REST daemon
+After=network.target munge.service slurmctld.service
+Requires=munge.service
+
+[Service]
+Type=simple
+Environment="SLURM_JWT=/var/spool/slurm/jwt_hs256.key"
+ExecStart=/opt/slurm/sbin/slurmrestd -a rest_auth/jwt 0.0.0.0:6820
+Restart=on-failure
+User=slurm
+Group=slurm
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Enable and start slurmrestd
+    systemctl daemon-reload
+    systemctl enable slurmrestd
+    systemctl start slurmrestd || {
+        echo "⚠️ slurmrestd failed to start. Checking logs..."
+        journalctl -u slurmrestd --no-pager -n 20
+    }
+    
+    # Check if slurmrestd is running
+    if systemctl is-active --quiet slurmrestd; then
+        echo "✅ slurmrestd is running on port 6820"
+    else
+        echo "⚠️ slurmrestd is not running. slurm-web may have limited functionality."
+    fi
 fi
 
 # Install and configure Open OnDemand

@@ -10,8 +10,12 @@
 # Set some environment variables to improve MPI behavior
 export OMPI_MCA_btl_vader_single_copy_mechanism=none
 
+# Use shared directory for compiled executable so it's accessible to all nodes
+SHARED_DIR="/shared/mpi-jobs"
+mkdir -p "$SHARED_DIR"
+
 # Clean up previous builds
-rm -f ./mpi_hello
+rm -f "$SHARED_DIR/mpi_hello"
 rm -f ./mpi_hello.c
 
 echo "Starting MPI job compilation and execution..."
@@ -81,9 +85,9 @@ int main(int argc, char** argv) {
 }
 EOF
 
-# Compile the MPI program
-echo "Compiling MPI program..."
-mpicc -o mpi_hello mpi_hello.c
+# Compile the MPI program to shared location
+echo "Compiling MPI program to shared directory..."
+mpicc -o "$SHARED_DIR/mpi_hello" mpi_hello.c
 
 # Check if compilation was successful
 if [ $? -ne 0 ]; then
@@ -91,10 +95,13 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Ensure executable permissions
+chmod +x "$SHARED_DIR/mpi_hello"
+
 echo "Compilation successful. Starting MPI execution..."
 
-# Run the MPI program using srun with timeout to prevent hanging
-timeout 120 srun --mpi=pmix ./mpi_hello
+# Run the MPI program using srun with absolute path to the executable
+timeout 120 srun --mpi=pmix "$SHARED_DIR/mpi_hello"
 
 exit_code=$?
 if [ $exit_code -eq 124 ]; then
@@ -109,4 +116,3 @@ fi
 
 # Clean up temporary files
 rm -f ./mpi_hello.c
-rm -f ./mpi_hello

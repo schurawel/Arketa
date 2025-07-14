@@ -29,6 +29,9 @@ grep -q "slurm-controller:/shared" /etc/fstab || echo "slurm-controller:/shared 
 echo "Mounting controller:/shared to /shared..."
 mount -t nfs slurm-controller:/shared /shared || echo "⚠️ NFS mount failed, will try later"
 
+# Ensure proper permissions on the shared directory
+chmod 777 /shared 2>/dev/null || true
+
 # Ensure SSH service is running and ready
 echo "Ensuring SSH service is ready..."
 systemctl enable ssh

@@ -5,7 +5,7 @@
 .PHONY: test-hello test-parallel test-stress test-array show-outputs wait-for-jobs test-and-wait
 .PHONY: test-python test-apptainer test-ml test-distributed test-extended test-mpi
 .PHONY: show-job-output show-all-outputs show-latest-outputs
-.PHONY: ondemand slurm-web open-ondemand open-slurm-web
+.PHONY: ondemand slurm-web open-ondemand open-slurm-web slurm-web-diag
 .PHONY: build-vagrant build-base remove-base list-boxes preflight setup-repos
 .PHONY: metal sim-metal sim-metal-status sim-metal-stop sim-metal-clean sim-metal-connect metal-clean
 .PHONY: q-cluster-refresh-samples
@@ -315,8 +315,7 @@ open-ondemand: ## 🌐 Open the OnDemand web interface in browser
 	@echo "$(BLUE)[INFO]$(NC) Opening OnDemand web interface..."
 	@if ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
 		echo "$(GREEN)[SUCCESS]$(NC) Controller VM is reachable at 192.168.7.10"; \
-		xdg-open http://192.168.7.10/ 2>/dev/null || \
-			echo "$(YELLOW)[WARNING]$(NC) Please open http://192.168.7.10/ in your browser"; \
+		xdg-open http://192.168.7.10/ 2>/dev/null || echo "$(BLUE)[INFO]$(NC) Open http://192.168.7.10/ in your browser"; \
 	else \
 		echo "$(RED)[ERROR]$(NC) Cannot reach controller VM at 192.168.7.10"; \
 		echo "$(YELLOW)[TIP]$(NC) Make sure the QEMU cluster is running with: make q-cluster"; \
@@ -335,11 +334,65 @@ open-slurm-web: ## 🌐 Open the Slurm web interface in browser
 	@echo "$(BLUE)[INFO]$(NC) Opening Slurm web interface..."
 	@if ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
 		echo "$(GREEN)[SUCCESS]$(NC) Controller VM is reachable at 192.168.7.10"; \
-		xdg-open http://192.168.7.10:5011 2>/dev/null || \
-			echo "$(YELLOW)[WARNING]$(NC) Please open http://192.168.7.10:5011 in your browser"; \
+		echo "$(BLUE)[INFO]$(NC) Checking if slurm-web service is accessible..."; \
+		if curl -s --head --connect-timeout 3 --max-time 5 http://192.168.7.10:5011/ > /dev/null 2>&1; then \
+			echo "$(GREEN)[SUCCESS]$(NC) slurm-web service is responding"; \
+			xdg-open http://192.168.7.10:5011 2>/dev/null || \
+				echo "$(YELLOW)[WARNING]$(NC) Please open http://192.168.7.10:5011 in your browser"; \
+		else \
+			echo "$(YELLOW)[WARNING]$(NC) slurm-web service is not responding on port 5011"; \
+			echo "$(BLUE)[INFO]$(NC) Checking if slurm-web service is running..."; \
+			if sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo systemctl is-active slurm-web-gateway" > /dev/null 2>&1; then \
+				echo "$(YELLOW)[WARNING]$(NC) slurm-web service is running but not accessible. Trying to restart it..."; \
+				sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo systemctl restart slurm-web-gateway"; \
+				echo "$(BLUE)[INFO]$(NC) Please wait a moment and try again."; \
+			else \
+				echo "$(RED)[ERROR]$(NC) slurm-web service is not running"; \
+				echo "$(YELLOW)[TIP]$(NC) Start slurm-web service with: make slurm-web"; \
+				echo "$(BLUE)[INFO]$(NC) Or start it manually on the controller:"; \
+				echo "  ssh ubuntu@192.168.7.10"; \
+				echo "  sudo systemctl start slurm-web-gateway"; \
+			fi; \
+		fi; \
 	else \
 		echo "$(RED)[ERROR]$(NC) Cannot reach controller VM at 192.168.7.10"; \
 		echo "$(YELLOW)[TIP]$(NC) Make sure the QEMU cluster is running with: make q-cluster"; \
+	fi
+
+slurm-web-diag: ## 🔍 Diagnose and fix slurm-web connectivity issues
+	@echo "$(BLUE)[INFO]$(NC) Running slurm-web diagnostics..."
+	@if ! ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
+		echo "$(RED)[ERROR]$(NC) Cannot ping controller at 192.168.7.10. Is the cluster running?"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)[SUCCESS]$(NC) Controller VM is reachable"
+	
+	@echo "$(BLUE)[INFO]$(NC) Copying fix-slurm-web.sh script to controller..."
+	@sshpass -p "ubuntu" scp -o StrictHostKeyChecking=no $(CURDIR)/scripts/fix-slurm-web.sh ubuntu@192.168.7.10:/tmp/fix-slurm-web.sh || \
+		(echo "$(RED)[ERROR]$(NC) Failed to copy fix script. Creating it directly on controller..."; \
+		sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "echo '#!/bin/bash' > /tmp/fix-slurm-web.sh; \
+		echo 'sudo sed -i \"s/^host=.*/host=0.0.0.0/\" /etc/slurm-web/gateway.ini || true' >> /tmp/fix-slurm-web.sh; \
+		echo 'sudo systemctl restart slurm-web-gateway slurm-web-agent' >> /tmp/fix-slurm-web.sh; \
+		chmod +x /tmp/fix-slurm-web.sh")
+	
+	@echo "$(BLUE)[INFO]$(NC) Running fix script on controller..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "chmod +x /tmp/fix-slurm-web.sh && sudo /tmp/fix-slurm-web.sh"
+	
+	@echo "$(YELLOW)[INFO]$(NC) Waiting 15 seconds for services to fully initialize..."
+	@sleep 15
+	
+	@echo "$(BLUE)[INFO]$(NC) Testing connectivity..."
+	@if curl -s --head --connect-timeout 5 --max-time 8 http://192.168.7.10:5011/ > /dev/null 2>&1; then \
+		echo "$(GREEN)[SUCCESS]$(NC) slurm-web service is now accessible at http://192.168.7.10:5011"; \
+		xdg-open http://192.168.7.10:5011 2>/dev/null || \
+			echo "$(YELLOW)[WARNING]$(NC) Please open http://192.168.7.10:5011 in your browser"; \
+	else \
+		echo "$(RED)[ERROR]$(NC) slurm-web service is still not accessible. See diagnostic output above for clues."; \
+		echo "$(YELLOW)[TIP]$(NC) Try manually running these commands:"; \
+		echo "  ssh ubuntu@192.168.7.10"; \
+		echo "  sudo sed -i 's/^host=.*/host=0.0.0.0/' /etc/slurm-web/gateway.ini"; \
+		echo "  sudo systemctl restart slurm-web-gateway slurm-web-agent"; \
+		echo "  sudo netstat -tulpn | grep 5011"; \
 	fi
 
 ## 📜 Job Testing Targets
@@ -534,6 +587,14 @@ q-cluster-test: ## 🧪 Run test jobs on the QEMU cluster
 		echo "$(RED)[ERROR]$(NC) Failed to copy sample jobs to controller VM"; \
 		exit 1; \
 	}
+	@echo "$(BLUE)[INFO]$(NC) Verifying Apptainer SIF file was copied..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "ls -la ~/sample-jobs/ubuntu_python.sif" || { \
+		echo "$(YELLOW)[WARNING]$(NC) Apptainer SIF file not found. Copying it specifically..."; \
+		sshpass -p "ubuntu" scp -o StrictHostKeyChecking=no ./sample-jobs/ubuntu_python.sif ubuntu@192.168.7.10:~/sample-jobs/ || { \
+			echo "$(RED)[ERROR]$(NC) Failed to copy Apptainer SIF file"; \
+			echo "$(YELLOW)[TIP]$(NC) If the file is large, try creating it directly on the controller VM"; \
+		}; \
+	}
 	@echo "$(BLUE)[INFO]$(NC) Submitting test jobs on controller VM..."
 	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "mkdir -p ~/sample-jobs-output"
 	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "cd ~/sample-jobs && chmod +x *.sh && echo 'Submitting jobs...' && for f in *.sh; do echo \"Submitting job: \$$f\"; sbatch \"\$$f\"; done"
@@ -577,7 +638,13 @@ q-cluster-refresh-samples: ## 🔄 Refresh sample jobs on QEMU cluster controlle
 		echo "$(RED)[ERROR]$(NC) Failed to copy sample jobs to controller VM"; \
 		exit 1; \
 	}
-	@echo "$(BLUE)[INFO]$(NC) Setting execute permissions on job scripts..."
-	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "cd ~/sample-jobs && chmod +x *.sh"
+	@echo "$(BLUE)[INFO]$(NC) Verifying Apptainer SIF file was copied..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "ls -la ~/sample-jobs/ubuntu_python.sif" || { \
+		echo "$(YELLOW)[WARNING]$(NC) Apptainer SIF file not found. Copying it specifically..."; \
+		sshpass -p "ubuntu" scp -o StrictHostKeyChecking=no ./sample-jobs/ubuntu_python.sif ubuntu@192.168.7.10:~/sample-jobs/ || { \
+			echo "$(RED)[ERROR]$(NC) Failed to copy Apptainer SIF file"; \
+			echo "$(YELLOW)[TIP]$(NC) If the file is large, try creating it directly on the controller VM"; \
+		}; \
+	}
 	@echo "$(GREEN)[SUCCESS]$(NC) Sample jobs have been refreshed on the QEMU cluster controller."
 	@echo "$(BLUE)[INFO]$(NC) Submit jobs with: ssh ubuntu@192.168.7.10 \"cd ~/sample-jobs && sbatch <job-script.sh>\""

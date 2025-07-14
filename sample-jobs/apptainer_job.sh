@@ -8,6 +8,9 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --partition=compute
 
+# Save original directory path where job was submitted
+SUBMIT_DIR=$(pwd)
+
 # Ensure all outputs are explicitly captured in SLURM output files
 mkdir -p ~/job_outputs
 cd ~/job_outputs
@@ -23,19 +26,18 @@ echo "=== Checking Apptainer Installation ==="
 which apptainer || echo "Apptainer not found in PATH"
 apptainer --version || echo "Cannot get Apptainer version"
 
-# Build Apptainer image locally (outside SLURM job)
-# This should be run manually or as a Makefile step, not inside the job script
-# Example command to run in the repo root:
-#   apptainer build sample-jobs/ubuntu_python.sif sample-jobs/ubuntu_python.def
+# Use the correct path to the container image directly
+CONTAINER_IMAGE="/home/ubuntu/sample-jobs/ubuntu_python.sif"
 
-# In the job, just run the pre-built image
-CONTAINER_IMAGE="/home/vagrant/sample-jobs/ubuntu_python.sif"
-
+# Run the container
 if [ -f "$CONTAINER_IMAGE" ]; then
     echo "=== Running Python in Apptainer container ==="
+    echo "Using container at: $CONTAINER_IMAGE"
     apptainer exec --writable-tmpfs "$CONTAINER_IMAGE" python3 -c "import sys; print('Python in Apptainer:', sys.version)"
 else
-    echo "Container image $CONTAINER_IMAGE not found!"
+    echo "Container image not found at $CONTAINER_IMAGE!"
+    echo "Available files in sample-jobs directory:"
+    ls -la /home/ubuntu/sample-jobs/
     exit 1
 fi
 

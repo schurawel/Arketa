@@ -15,9 +15,8 @@ BASE_VM_IMAGE="${VM_DIR}/slurm-base-vm.qcow2"
 CONTROLLER_IMAGE="${VM_DIR}/slurm-controller.qcow2"
 NODE1_IMAGE="${VM_DIR}/slurm-node1.qcow2"
 NODE2_IMAGE="${VM_DIR}/slurm-node2.qcow2"
-# Use home directory for temp and cloud-init files where user has write permissions
+# Use home directory for temp files where user has write permissions
 TMP_DIR="/home/thinclient/Documents/PrimedSLURM/tmp/qemu-build"
-CLOUD_INIT_DIR="/home/thinclient/Documents/PrimedSLURM/tmp/cloud-init"
 SCRIPTS_DIR="/home/thinclient/Documents/PrimedSLURM/scripts"
 SAMPLE_JOBS_DIR="/home/thinclient/Documents/PrimedSLURM/sample-jobs"
 
@@ -38,7 +37,7 @@ VM_PASSWORD="ubuntu"
 # Function to terminate all running QEMU processes
 kill_qemu_processes() {
     echo -e "Removing temporary files"
-    rm -r ./qemu-vms/tmp/
+    rm -rf ./qemu-vms/tmp/ 2>/dev/null || true
     echo -e "${YELLOW}Checking for running QEMU VM instances...${NC}"
     QEMU_PROCS=$(pgrep -l qemu-system)
     
@@ -47,7 +46,7 @@ kill_qemu_processes() {
         echo "$QEMU_PROCS"
         
         echo -e "${YELLOW}Terminating all running QEMU VMs...${NC}"
-        pkill qemu-system
+        pkill qemu-system || pkill qemu-system
         
         # Wait for processes to terminate
         sleep 2
@@ -55,7 +54,7 @@ kill_qemu_processes() {
         # Check if any processes are still running
         if pgrep qemu-system > /dev/null; then
             echo -e "${RED}Some QEMU processes couldn't be terminated. Forcing...${NC}"
-            pkill -9 qemu-system
+            pkill -9 qemu-system || pkill -9 qemu-system
             sleep 1
         fi
         
@@ -77,76 +76,10 @@ check_image() {
     fi
 }
 
-# Function to create cloud-init ISO
-create_cloud_init() {
-    local hostname=$1
-    local static_ip=$2
-    local output_iso=$3
-    
-    echo -e "${BLUE}Creating cloud-init ISO for ${hostname}...${NC}"
-    
-    # Create temporary directory for cloud-init files
-    local ci_tmp="${TMP_DIR}/cloud-init-${hostname}"
-    mkdir -p "$ci_tmp"
-    
-    # Create meta-data
-    cat > "${ci_tmp}/meta-data" <<EOF
-instance-id: ${hostname}
-local-hostname: ${hostname}
-EOF
-    
-    # Create user-data with network configuration
-    cat > "${ci_tmp}/user-data" <<EOF
-#cloud-config
-hostname: ${hostname}
-manage_etc_hosts: true
-users:
-  - name: ${VM_USERNAME}
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    groups: users, admin
-    home: /home/${VM_USERNAME}
-    shell: /bin/bash
-    lock_passwd: false
-    passwd: $(openssl passwd -1 "${VM_PASSWORD}")
-    ssh_authorized_keys:
-      - $(cat ~/.ssh/id_rsa.pub 2>/dev/null || echo "")
-
-ssh_pwauth: true
-
-write_files:
-  - path: /etc/netplan/01-netcfg.yaml
-    content: |
-      network:
-        version: 2
-        ethernets:
-          ens3:
-            dhcp4: no
-            addresses: [${static_ip}/24]
-            gateway4: 192.168.7.1
-            nameservers:
-              addresses: [8.8.8.8, 8.8.4.4]
-
-runcmd:
-  - netplan apply
-  - systemctl restart ssh
-  - echo "${CONTROLLER_IP} slurm-controller controller" >> /etc/hosts
-  - echo "${NODE1_IP} node1" >> /etc/hosts
-  - echo "${NODE2_IP} node2" >> /etc/hosts
-EOF
-    
-    # Create ISO
-    genisoimage -output "$output_iso" -volid cidata -joliet -rock "${ci_tmp}/user-data" "${ci_tmp}/meta-data"
-    
-    # Cleanup
-    rm -rf "$ci_tmp"
-    
-    echo -e "${GREEN}Cloud-init ISO created: $output_iso${NC}"
-}
-
 # Ensure necessary directories exist with proper permissions
 create_directories() {
     echo -e "${BLUE}Creating necessary directories...${NC}"
-    mkdir -p "$TMP_DIR" "$CLOUD_INIT_DIR"
+    mkdir -p "$TMP_DIR"
     
     # Ensure VM directory exists
     if [ ! -d "$VM_DIR" ]; then
@@ -155,14 +88,13 @@ create_directories() {
     fi
     
     # Check write permissions
-    if [ ! -w "$TMP_DIR" ] || [ ! -w "$CLOUD_INIT_DIR" ] || [ ! -w "$VM_DIR" ]; then
+    if [ ! -w "$TMP_DIR" ] || [ ! -w "$VM_DIR" ]; then
         echo -e "${RED}Error: No write permissions to required directories.${NC}"
         echo -e "${YELLOW}Try running: sudo mkdir -p ${VM_DIR} && sudo chown $(whoami):$(whoami) ${VM_DIR}${NC}"
         exit 1
     fi
 }
-
-# Function to wait for SSH to be available 
+# Function to wait for SSH to be available - USED ONLY FOR INITIAL SETUP
 wait_for_ssh() {
     local host=$1
     local port=$2
@@ -182,7 +114,7 @@ wait_for_ssh() {
             sleep 10
             
             # Test SSH connectivity
-            if sshpass -p "${VM_PASSWORD}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -p "${port}" ${VM_USERNAME}@"${host}" "echo 'SSH is working'" 2>/dev/null; then
+            if sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -p "${port}" ubuntu@"${host}" "echo 'SSH is working'"; then
                 echo -e "${GREEN}${name} SSH is fully ready!${NC}"
                 return 0
             else
@@ -196,7 +128,6 @@ wait_for_ssh() {
     echo -e "${RED}Failed to connect to ${name} SSH after ${max_attempts} attempts.${NC}"
     return 1
 }
-
 # Function to build base image with Slurm
 build_base_image() {
     echo -e "${BLUE}=== PHASE 1: Building Slurm Base Image ===${NC}"
@@ -223,12 +154,6 @@ build_base_image() {
         exit 1
     }
     
-    # Create cloud-init ISO for base VM
-    create_cloud_init "slurm-base" "192.168.7.100" "${CLOUD_INIT_DIR}/base-cloud-init.iso" || {
-        echo -e "${RED}Failed to create cloud-init ISO. Aborting.${NC}"
-        exit 1
-    }
-    
     # Kill any existing QEMU processes for base VM
     pkill -f "qemu.*slurm-base" || true
     sleep 2
@@ -246,7 +171,6 @@ exec qemu-system-x86_64 -m 4096 -smp 4 \\
     -enable-kvm \\
     -cpu host \\
     -drive file="$BASE_VM_IMAGE",format=qcow2 \\
-    -cdrom "${CLOUD_INIT_DIR}/base-cloud-init.iso" \\
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \\
     -device virtio-net-pci,netdev=net0 \\
     -nographic \\
@@ -270,6 +194,12 @@ EOF
         echo -e "${RED}Failed to connect to base VM. Check VM console for errors.${NC}"
         exit 1
     fi
+    
+    # Configure hostname via SSH
+    echo -e "${BLUE}Configuring hostname for base VM...${NC}"
+    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no -p 2222 "${VM_USERNAME}@localhost" << EOF
+sudo hostnamectl set-hostname slurm-base
+EOF
     
     # Copy scripts and source code to VM
     echo -e "${BLUE}Copying setup scripts and source code...${NC}"
@@ -300,67 +230,6 @@ EOF
     echo -e "${GREEN}Base image built successfully!${NC}"
 }
 
-# Function to setup virtual switch (reused from auto_vm_connect_bridge.sh)
-setup_virtual_switch() {
-    # ... existing code from auto_vm_connect_bridge.sh setup_virtual_switch function ...
-    SWITCH_NAME="vswitch0"
-    INTERNAL_PORT="vswitch0-int"
-    
-    echo -e "${BLUE}Setting up Open vSwitch virtual switch ${SWITCH_NAME}...${NC}"
-    
-    # Install Open vSwitch if not already installed
-    if ! command -v ovs-vsctl &> /dev/null; then
-        echo -e "${YELLOW}Installing Open vSwitch...${NC}"
-        sudo apt-get update
-        sudo apt-get install -y openvswitch-switch openvswitch-common
-        sudo systemctl start openvswitch-switch
-        sudo systemctl enable openvswitch-switch
-    fi
-    
-    # Remove existing switch if it exists
-    if sudo ovs-vsctl br-exists "${SWITCH_NAME}" 2>/dev/null; then
-        echo -e "${YELLOW}Removing existing virtual switch...${NC}"
-        sudo ovs-vsctl del-br "${SWITCH_NAME}"
-        sleep 2
-    fi
-    
-    # Find the default network interface
-    DEFAULT_IFACE=$(ip route show default | grep -Eo 'dev [^ ]+' | cut -d ' ' -f 2)
-    if [ -z "$DEFAULT_IFACE" ]; then
-        echo -e "${RED}Failed to determine default internet interface.${NC}"
-        exit 1
-    fi
-    
-    # Create virtual switch
-    sudo ovs-vsctl add-br "${SWITCH_NAME}"
-    
-    # Create internal port for host connectivity
-    sudo ovs-vsctl add-port "${SWITCH_NAME}" "${INTERNAL_PORT}" -- set interface "${INTERNAL_PORT}" type=internal
-    
-    # Configure the internal port
-    sudo ip link set "${INTERNAL_PORT}" up
-    sudo ip addr add 192.168.7.1/24 dev "${INTERNAL_PORT}"
-    
-    # Create TAP interfaces for VMs
-    for i in 0 1 2; do
-        TAP_NAME="tap${i}"
-        sudo ip link delete "${TAP_NAME}" 2>/dev/null || true
-        sudo ip tuntap add mode tap "${TAP_NAME}"
-        sudo ip link set "${TAP_NAME}" up
-        sudo ovs-vsctl add-port "${SWITCH_NAME}" "${TAP_NAME}"
-    done
-    
-    # Set up NAT
-    sudo iptables -t nat -D POSTROUTING -s 192.168.7.0/24 -j MASQUERADE 2>/dev/null || true
-    sudo iptables -t nat -A POSTROUTING -s 192.168.7.0/24 -o "${DEFAULT_IFACE}" -j MASQUERADE
-    
-    # Enable IP forwarding
-    echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
-    sudo sysctl -w net.ipv4.ip_forward=1
-    
-    echo -e "${GREEN}Virtual switch setup completed.${NC}"
-}
-
 # Function to create and configure controller VM
 create_controller() {
     echo -e "${BLUE}=== PHASE 2: Creating Controller VM ===${NC}"
@@ -381,12 +250,6 @@ create_controller() {
     else
         echo -e "${YELLOW}Controller image already exists. Using existing image.${NC}"
     fi
-    
-    # Create cloud-init ISO for controller VM
-    create_cloud_init "slurm-controller" "$CONTROLLER_IP" "${CLOUD_INIT_DIR}/controller-cloud-init.iso" || {
-        echo -e "${RED}Failed to create cloud-init ISO for controller. Aborting.${NC}"
-        exit 1
-    }
     
     echo -e "${GREEN}Controller VM image created successfully!${NC}"
 }
@@ -423,17 +286,6 @@ create_compute_nodes() {
         echo -e "${YELLOW}Node2 image already exists. Using existing image.${NC}"
     fi
     
-    # Create cloud-init ISOs for compute nodes
-    create_cloud_init "node1" "$NODE1_IP" "${CLOUD_INIT_DIR}/node1-cloud-init.iso" || {
-        echo -e "${RED}Failed to create cloud-init ISO for node1. Aborting.${NC}"
-        exit 1
-    }
-    
-    create_cloud_init "node2" "$NODE2_IP" "${CLOUD_INIT_DIR}/node2-cloud-init.iso" || {
-        echo -e "${RED}Failed to create cloud-init ISO for node2. Aborting.${NC}"
-        exit 1
-    }
-    
     echo -e "${GREEN}Compute node VM images created successfully!${NC}"
 }
 
@@ -455,12 +307,25 @@ start_cluster_vms() {
     # Ensure virtual switch is setup
     setup_virtual_switch
     
-    # Set TAP permissions
+    # Set TAP permissions properly before starting VMs
+    echo -e "${BLUE}Setting proper permissions for TAP devices...${NC}"
+    sudo ip tuntap add dev tap0 mode tap user $(whoami)
+    sudo ip link set dev tap0 up
+    sudo ovs-vsctl --may-exist add-port $BRIDGE_NAME tap0
+    
+    sudo ip tuntap add dev tap1 mode tap user $(whoami)
+    sudo ip link set dev tap1 up
+    sudo ovs-vsctl --may-exist add-port $BRIDGE_NAME tap1
+    
+    sudo ip tuntap add dev tap2 mode tap user $(whoami)
+    sudo ip link set dev tap2 up
+    sudo ovs-vsctl --may-exist add-port $BRIDGE_NAME tap2
+    
     sudo chown $(whoami) /dev/net/tun
     
     # Create VM start scripts for xterm windows
     
-    # Controller VM script
+    # Controller VM script - removed sudo from exec line
     CONTROLLER_SCRIPT="${TMP_DIR}/start_controller.sh"
     cat > "${CONTROLLER_SCRIPT}" <<EOF
 #!/bin/bash
@@ -468,8 +333,8 @@ echo "Starting Slurm controller VM..."
 
 export QEMU_AUDIO_DRV=none
 
-# Run QEMU with TAP networking
-exec sudo qemu-system-x86_64 -m 4096 -smp 4 \\
+# Run QEMU with TAP networking (removed sudo from exec line)
+exec qemu-system-x86_64 -m 4096 -smp 4 \\
     -enable-kvm \\
     -cpu host \\
     -drive file="${CONTROLLER_IMAGE}",format=qcow2 \\
@@ -481,7 +346,7 @@ exec sudo qemu-system-x86_64 -m 4096 -smp 4 \\
 EOF
     chmod +x "${CONTROLLER_SCRIPT}"
     
-    # Node1 VM script
+    # Node1 VM script - removed sudo from exec line
     NODE1_SCRIPT="${TMP_DIR}/start_node1.sh"
     cat > "${NODE1_SCRIPT}" <<EOF
 #!/bin/bash
@@ -489,8 +354,8 @@ echo "Starting Slurm node1 VM..."
 
 export QEMU_AUDIO_DRV=none
 
-# Run QEMU with TAP networking
-exec sudo qemu-system-x86_64 -m 4096 -smp 4 \\
+# Run QEMU with TAP networking (removed sudo from exec line)
+exec qemu-system-x86_64 -m 4096 -smp 4 \\
     -enable-kvm \\
     -cpu host \\
     -drive file="${NODE1_IMAGE}",format=qcow2 \\
@@ -502,7 +367,7 @@ exec sudo qemu-system-x86_64 -m 4096 -smp 4 \\
 EOF
     chmod +x "${NODE1_SCRIPT}"
     
-    # Node2 VM script
+    # Node2 VM script - removed sudo from exec line
     NODE2_SCRIPT="${TMP_DIR}/start_node2.sh"
     cat > "${NODE2_SCRIPT}" <<EOF
 #!/bin/bash
@@ -510,8 +375,8 @@ echo "Starting Slurm node2 VM..."
 
 export QEMU_AUDIO_DRV=none
 
-# Run QEMU with TAP networking
-exec sudo qemu-system-x86_64 -m 4096 -smp 4 \\
+# Run QEMU with TAP networking (removed sudo from exec line)
+exec qemu-system-x86_64 -m 4096 -smp 4 \\
     -enable-kvm \\
     -cpu host \\
     -drive file="${NODE2_IMAGE}",format=qcow2 \\
@@ -538,7 +403,7 @@ EOF
     xterm -title "Slurm Node2" -e "${NODE2_SCRIPT}" &
     
     echo -e "${BLUE}Waiting for VMs to boot...${NC}"
-    sleep 60
+    sleep 20
 }
 
 # Function to configure network on VMs
@@ -548,13 +413,6 @@ configure_vm_network() {
     local mac=$3
     
     echo -e "${BLUE}Configuring network for ${hostname}...${NC}"
-    
-    # Update cloud-init config for static IP
-    local cloud_init_iso="${CLOUD_INIT_DIR}/${hostname}-cloud-init.iso"
-    create_cloud_init "$hostname" "$ip" "$cloud_init_iso" || {
-        echo -e "${RED}Failed to create cloud-init ISO for ${hostname}. Aborting.${NC}"
-        exit 1
-    }
     
     # Restart VM with new cloud-init ISO
     echo -e "${BLUE}Restarting ${hostname} VM with new network configuration...${NC}"
@@ -569,7 +427,6 @@ configure_vm_network() {
         -enable-kvm \
         -cpu host \
         -drive file="${VM_DIR}/${hostname}.qcow2",format=qcow2 \
-        -cdrom "$cloud_init_iso" \
         -netdev tap,id=net0,ifname="tap${hostname: -1}",script=no,downscript=no \
         -device virtio-net-pci,netdev=net0,mac="$mac" \
         -nographic \
@@ -655,9 +512,6 @@ cleanup_cluster() {
     # Remove VM images (but keep base image)
     rm -f "$CONTROLLER_IMAGE" "$NODE1_IMAGE" "$NODE2_IMAGE"
     
-    # Clean up cloud-init ISOs
-    rm -f "${CLOUD_INIT_DIR}"/*.iso
-    
     # Remove virtual switch
     if sudo ovs-vsctl br-exists "$BRIDGE_NAME" 2>/dev/null; then
         sudo ovs-vsctl del-br "$BRIDGE_NAME"
@@ -681,93 +535,319 @@ start_controller_vm() {
         create_controller
     fi
     
-    # Ensure virtual switch is setup
-    setup_virtual_switch
+    # PHASE 1: First start VM with user networking (port forwarding) for initial setup
+    echo -e "${BLUE}PHASE 1: Starting controller VM with user networking for initial setup${NC}"
     
-    # Set TAP permissions
-    sudo chown $(whoami) /dev/net/tun
-    
-    # Create controller VM script
-    CONTROLLER_SCRIPT="${TMP_DIR}/start_controller.sh"
-    cat > "${CONTROLLER_SCRIPT}" <<EOF
+    # Create controller VM script with user networking
+    CONTROLLER_USER_SCRIPT="${TMP_DIR}/start_controller_user.sh"
+    cat > "${CONTROLLER_USER_SCRIPT}" <<EOF
 #!/bin/bash
-echo "Starting Slurm controller VM..."
+echo "Starting controller VM with user networking for initial setup..."
 
 export QEMU_AUDIO_DRV=none
 
-# Run QEMU with TAP networking
-exec sudo qemu-system-x86_64 -m 4096 -smp 4 \\
+# Run QEMU with user networking for SSH access - EXACT SAME COMMAND AS auto_vm_connect_bridge.sh
+exec qemu-system-x86_64 -m 4096 -smp 4 \\
     -enable-kvm \\
     -cpu host \\
     -drive file="${CONTROLLER_IMAGE}",format=qcow2 \\
-    -cdrom "${CLOUD_INIT_DIR}/controller-cloud-init.iso" \\
+    -netdev user,id=net0,hostfwd=tcp::2222-:22 \\
+    -device virtio-net-pci,netdev=net0 \\
+    -nographic \\
+    -serial mon:stdio
+EOF
+    chmod +x "${CONTROLLER_USER_SCRIPT}"
+    
+    # Start controller VM with user networking
+    echo -e "${BLUE}Starting controller VM with user networking...${NC}"
+    xterm -title "Controller VM" -e "${CONTROLLER_USER_SCRIPT}" &
+    CONTROLLER_USER_PID=$!
+    
+    # Wait for VM to boot
+    echo -e "${BLUE}Waiting for controller VM to boot...${NC}"
+    sleep 30
+    
+    # Wait for SSH to be available - using same approach as auto_vm_connect_bridge.sh
+    echo -e "${BLUE}Waiting for SSH on controller VM...${NC}"
+    if ! wait_for_ssh "localhost" "2222" "controller VM"; then
+        echo -e "${RED}Failed to connect to controller VM. Check VM console for errors.${NC}"
+        return 1
+    fi
+    
+    # Create directory structure but NO symlink
+    echo -e "${BLUE}Preparing for controller setup...${NC}"
+    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no -p 2222 "${VM_USERNAME}@localhost" <<EOF
+# Ensure we have a scripts directory
+mkdir -p /home/ubuntu/scripts
+EOF
+    
+    # PHASE 2: Configure network settings inside VM
+    echo -e "${BLUE}PHASE 2: Configuring network settings inside controller VM${NC}"
+    
+    # Configure network via SSH - EXACT SAME CODE AS auto_vm_connect_bridge.sh
+    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no -p 2222 "${VM_USERNAME}@localhost" << EOF
+# Disable systemd network wait services
+echo "Disabling systemd network wait services..."
+sudo systemctl disable systemd-networkd-wait-online.service 2>/dev/null || true
+sudo systemctl mask systemd-networkd-wait-online.service 2>/dev/null || true
+
+# Disable cloud-init network configuration if it exists
+sudo touch /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg 2>/dev/null || true
+echo "network: {config: disabled}" | sudo tee /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg 2>/dev/null || true
+
+# Remove any existing netplan configurations
+echo "Removing existing netplan configurations..."
+sudo rm -f /etc/netplan/*.yaml
+
+# Detect the network interface
+echo "Detecting network interface..."
+IFACE=\$(ip link | grep -v lo | grep -E "ens|enp|eth" | head -1 | cut -d: -f2 | tr -d ' ')
+echo "Found interface: \$IFACE"
+
+# Create a simple netplan configuration
+echo "Creating netplan configuration..."
+cat > /tmp/01-netcfg.yaml << NETPLAN
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    \${IFACE}:
+      dhcp4: no
+      addresses: [${CONTROLLER_IP}/24]
+      routes:
+        - to: default
+          via: 192.168.7.1
+      nameservers:
+        addresses: [8.8.8.8, 8.8.4.4]
+NETPLAN
+
+sudo mv /tmp/01-netcfg.yaml /etc/netplan/01-netcfg.yaml
+sudo chmod 600 /etc/netplan/01-netcfg.yaml
+
+# Create rc.local script to ensure network comes up on boot
+echo "Creating network startup script..."
+cat > /tmp/rc.local << 'RCLOCAL'
+#!/bin/bash
+# Wait for network interface
+sleep 5
+
+# Get interface name
+IFACE=\$(ip link | grep -v lo | grep -E "ens|enp|eth" | head -1 | cut -d: -f2 | tr -d ' ')
+
+if [ -n "\$IFACE" ]; then
+    # Bring interface up
+    ip link set \$IFACE up
+    
+    # Apply static IP
+    ip addr flush dev \$IFACE
+    ip addr add ${CONTROLLER_IP}/24 dev \$IFACE
+    ip link set \$IFACE up
+    
+    # Add default route
+    ip route del default 2>/dev/null || true
+    ip route add default via 192.168.7.1
+    
+    # Try netplan apply (may fail but that's ok)
+    netplan apply 2>/dev/null || true
+fi
+
+exit 0
+RCLOCAL
+
+sudo mv /tmp/rc.local /etc/rc.local
+sudo chmod +x /etc/rc.local
+
+# Enable rc-local service
+sudo systemctl enable rc-local 2>/dev/null || true
+
+# Set hostname
+sudo hostnamectl set-hostname slurm-controller
+
+# Configure hosts file
+echo "Configuring hosts file..."
+sudo tee /etc/hosts > /dev/null << HOSTS
+127.0.0.1 localhost
+${CONTROLLER_IP} slurm-controller controller
+${NODE1_IP} node1
+${NODE2_IP} node2
+HOSTS
+
+# Configure SSH
+echo "Configuring SSH for password authentication..."
+sudo sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+sudo systemctl restart ssh
+
+echo "Network configuration completed for controller VM"
+EOF
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to configure network settings in controller VM.${NC}"
+        return 1
+    fi
+    
+    # Shutdown the VM to apply network changes
+    echo -e "${BLUE}Shutting down controller VM to apply network changes...${NC}"
+    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no -p 2222 "${VM_USERNAME}@localhost" "sudo poweroff"
+    
+    # Wait for VM to shutdown
+    sleep 20
+    
+    # PHASE 3: Set up virtual switch
+    echo -e "${BLUE}PHASE 3: Setting up virtual switch for controller VM${NC}"
+    setup_virtual_switch
+    
+    # PHASE 4: Start controller VM with virtual switch networking
+    echo -e "${BLUE}PHASE 4: Starting controller VM with virtual switch networking${NC}"
+    
+    # Create controller VM script with TAP networking - modified to avoid password prompts
+    CONTROLLER_TAP_SCRIPT="${TMP_DIR}/start_controller_tap.sh"
+    cat > "${CONTROLLER_TAP_SCRIPT}" <<EOF
+#!/bin/bash
+echo "Starting controller VM with virtual switch networking..."
+
+export QEMU_AUDIO_DRV=none
+
+# Run QEMU with TAP networking (removed sudo from exec line)
+qemu-system-x86_64 -m 4096 -smp 4 \\
+    -enable-kvm \\
+    -cpu host \\
+    -drive file="${CONTROLLER_IMAGE}",format=qcow2 \\
     -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \\
     -device virtio-net-pci,netdev=net0,mac=${CONTROLLER_MAC} \\
     -nographic \\
     -serial mon:stdio \\
     -name "slurm-controller"
 EOF
-    chmod +x "${CONTROLLER_SCRIPT}"
+    chmod +x "${CONTROLLER_TAP_SCRIPT}"
     
-    # Start controller VM
-    echo -e "${BLUE}Starting controller VM in xterm...${NC}"
-    xterm -title "Slurm Controller" -e "${CONTROLLER_SCRIPT}" &
+    # Set TAP permissions properly before starting VM (moved before script execution)
+    echo -e "${BLUE}Setting proper permissions for TAP devices...${NC}"
+    sudo ip tuntap add dev tap0 mode tap user $(whoami)
+    sudo ip link set dev tap0 up
+    sudo ovs-vsctl --may-exist add-port $BRIDGE_NAME tap0
     
-    # Wait for VM to boot and network to be ready
-    echo -e "${BLUE}Waiting for controller VM to boot and be accessible...${NC}"
-    for i in {1..60}; do
-        if ping -c 1 -W 2 $CONTROLLER_IP >/dev/null 2>&1; then
-            echo -e "${GREEN}Controller VM is accessible at ${CONTROLLER_IP}${NC}"
-            break
-        fi
-        sleep 5
-        if [ $i -eq 60 ]; then
-            echo -e "${RED}Timed out waiting for controller VM to be accessible.${NC}"
-            return 1
-        fi
-    done
+    # Start controller VM with TAP networking (using sudo with the script instead)
+    echo -e "${BLUE}Starting controller VM with virtual switch networking...${NC}"
+    xterm -title "Slurm Controller" -e "${CONTROLLER_TAP_SCRIPT}" &
     
-    # Wait for SSH to be available
+    # Wait for VM to boot with the new network - increased waiting time
+    echo -e "${BLUE}Waiting for controller VM to boot with virtual switch networking...${NC}"
+    sleep 10
+    
+    # PHASE 5: Verify connectivity using direct IP - SAME AS auto_vm_connect_bridge.sh approach
+    echo -e "${BLUE}PHASE 5: Verifying connectivity to controller VM${NC}"
+    
+    # Wait for ping to succeed
+    echo -e "${BLUE}Checking ping connectivity to ${CONTROLLER_IP}...${NC}"
     for i in {1..30}; do
-        if nc -z -w 2 $CONTROLLER_IP 22; then
-            echo -e "${GREEN}SSH is available on controller${NC}"
+        echo -e "${YELLOW}Ping attempt ${i}/30...${NC}"
+        if ping -c 1 -W 2 "${CONTROLLER_IP}" > /dev/null 2>&1; then
+            echo -e "${GREEN}Successfully pinged controller VM at ${CONTROLLER_IP}${NC}"
             break
         fi
-        sleep 5
+        
         if [ $i -eq 30 ]; then
-            echo -e "${RED}Timed out waiting for SSH on controller.${NC}"
+            echo -e "${RED}Failed to ping controller VM after 30 attempts.${NC}"
+            echo -e "${YELLOW}Network debug information:${NC}"
+            sudo ovs-vsctl show
+            sudo ip link show tap0
             return 1
         fi
+        
+        sleep 5
     done
     
-    # Copy scripts to controller
-    echo -e "${BLUE}Copying scripts to controller...${NC}"
-    sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -r "$SCRIPTS_DIR" "${VM_USERNAME}@${CONTROLLER_IP}:~/"
-    sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -r "$SAMPLE_JOBS_DIR" "${VM_USERNAME}@${CONTROLLER_IP}:~/"
+    # Wait for SSH to be available on direct IP
+    echo -e "${BLUE}Checking SSH connectivity to ${CONTROLLER_IP}...${NC}"
+    for i in {1..30}; do
+        echo -e "${YELLOW}SSH check attempt ${i}/30...${NC}"
+        if nc -z -w 2 "${CONTROLLER_IP}" 22; then
+            echo -e "${GREEN}SSH port is open on controller VM${NC}"
+            sleep 10  # Give SSH service a bit more time to fully initialize
+            break
+        fi
+        
+        if [ $i -eq 30 ]; then
+            echo -e "${RED}SSH port not open on controller VM after 30 attempts.${NC}"
+            return 1
+        fi
+        
+        sleep 5
+    done
     
-    # Run controller setup script
-    echo -e "${BLUE}Running setup-controller.sh inside VM...${NC}"
-    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${CONTROLLER_IP}" <<'EOF'
-sudo chmod +x ~/scripts/*.sh
-sudo ~/scripts/setup-controller.sh
+    # PHASE 6: Provision controller
+    echo -e "${BLUE}PHASE 6: Provisioning controller VM${NC}"
+    
+    # Copy scripts and sample jobs to controller
+    echo -e "${BLUE}Copying scripts and sample jobs to controller...${NC}"
+    sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -r "$SCRIPTS_DIR" "${VM_USERNAME}@${CONTROLLER_IP}:~/" || {
+        echo -e "${RED}ERROR: Failed to copy scripts to controller VM${NC}"
+        exit 1
+    }
+    sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -r "$SAMPLE_JOBS_DIR" "${VM_USERNAME}@${CONTROLLER_IP}:~/" || {
+        echo -e "${RED}ERROR: Failed to copy sample jobs to controller VM${NC}"
+        exit 1
+    }
+    
+    # Verify scripts directory and required scripts exist
+    echo -e "${BLUE}Verifying required scripts exist...${NC}"
+    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${CONTROLLER_IP}" << 'EOF'
+if [ ! -d ~/scripts ]; then
+    echo "ERROR: Scripts directory not found on controller VM"
+    exit 1
+fi
+
+# Check for required script files
+REQUIRED_SCRIPTS=("setup-controller.sh" "setup-slurmdbd.sh")
+for script in "${REQUIRED_SCRIPTS[@]}"; do
+    if [ ! -f ~/scripts/$script ]; then
+        echo "ERROR: Required script ~/scripts/$script not found"
+        exit 1
+    fi
+    # Make sure scripts are executable
+    chmod +x ~/scripts/$script
+done
+
+echo "All required scripts verified"
 EOF
+
+    # If the verification failed, exit
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}ERROR: Script verification failed on controller VM${NC}"
+        exit 1
+    fi
     
-    if [ $? -eq 0 ]; then
+    # Run controller setup script with proper error handling
+    echo -e "${BLUE}Running setup-controller.sh inside VM...${NC}"
+    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${CONTROLLER_IP}" << 'EOF'
+# Run controller setup script
+echo "Starting controller setup..."
+sudo ~/scripts/setup-controller.sh
+# Check return code
+if [ $? -ne 0 ]; then
+    echo "ERROR: Controller setup script failed"
+    exit 1
+fi
+EOF
+
+    # Check if controller setup succeeded
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}ERROR: Failed to setup controller VM${NC}"
+        return 1
+    else
         echo -e "${GREEN}Controller VM setup completed successfully!${NC}"
         return 0
-    else
-        echo -e "${RED}Failed to setup controller VM.${NC}"
-        return 1
     fi
 }
 
-# Function to start compute node VM and provision it
+# Update start_compute_node to use the same multi-phase approach
 start_compute_node() {
     local node_num=$1
     local node_ip="192.168.7.1${node_num}"
     local node_mac="52:54:00:12:34:1${node_num}"
     local node_image="${VM_DIR}/slurm-node${node_num}.qcow2"
     local node_name="node${node_num}"
+    local ssh_port=$((2223 + node_num - 1))  # 2223 for node1, 2224 for node2
     
     echo -e "${BLUE}=== Starting and Provisioning ${node_name} ===${NC}"
     
@@ -777,58 +857,234 @@ start_compute_node() {
         return 1
     fi
     
-    # Create node VM script
-    local node_script="${TMP_DIR}/start_${node_name}.sh"
-    cat > "${node_script}" <<EOF
+    # PHASE 1: Start with user networking for initial setup
+    echo -e "${BLUE}PHASE 1: Starting ${node_name} with user networking for initial setup${NC}"
+    
+    # Create VM script with user networking
+    local node_user_script="${TMP_DIR}/start_${node_name}_user.sh"
+    cat > "${node_user_script}" <<EOF
 #!/bin/bash
-echo "Starting Slurm ${node_name} VM..."
+echo "Starting ${node_name} with user networking for initial setup..."
 
 export QEMU_AUDIO_DRV=none
 
-# Run QEMU with TAP networking
-exec sudo qemu-system-x86_64 -m 4096 -smp 4 \\
+# Run QEMU with user networking
+exec qemu-system-x86_64 -m 4096 -smp 4 \\
     -enable-kvm \\
     -cpu host \\
     -drive file="${node_image}",format=qcow2 \\
-    -cdrom "${CLOUD_INIT_DIR}/${node_name}-cloud-init.iso" \\
+    -netdev user,id=net0,hostfwd=tcp::${ssh_port}-:22 \\
+    -device virtio-net-pci,netdev=net0 \\
+    -nographic \\
+    -serial mon:stdio
+EOF
+    chmod +x "${node_user_script}"
+    
+    # Start node VM with user networking
+    echo -e "${BLUE}Starting ${node_name} with user networking...${NC}"
+    xterm -title "${node_name}" -e "${node_user_script}" &
+    
+    # Wait for VM to boot
+    echo -e "${BLUE}Waiting for ${node_name} to boot...${NC}"
+    sleep 30
+    
+    # Wait for SSH to be available
+    echo -e "${BLUE}Waiting for SSH on ${node_name}...${NC}"
+    if ! wait_for_ssh "localhost" "${ssh_port}" "${node_name}"; then
+        echo -e "${RED}Failed to connect to ${node_name}. Check VM console for errors.${NC}"
+        return 1
+    fi
+    
+    # PHASE 2: Configure network settings inside VM
+    echo -e "${BLUE}PHASE 2: Configuring network settings inside ${node_name}${NC}"
+    
+    # Configure network via SSH
+    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no -p ${ssh_port} "${VM_USERNAME}@localhost" << EOF
+# Disable systemd network wait services
+echo "Disabling systemd network wait services..."
+sudo systemctl disable systemd-networkd-wait-online.service 2>/dev/null || true
+sudo systemctl mask systemd-networkd-wait-online.service 2>/dev/null || true
+
+# Disable cloud-init network configuration if it exists
+sudo touch /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg 2>/dev/null || true
+echo "network: {config: disabled}" | sudo tee /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg 2>/dev/null || true
+
+# Remove any existing netplan configurations
+echo "Removing existing netplan configurations..."
+sudo rm -f /etc/netplan/*.yaml
+
+# Detect the network interface
+echo "Detecting network interface..."
+IFACE=\$(ip link | grep -v lo | grep -E "ens|enp|eth" | head -1 | cut -d: -f2 | tr -d ' ')
+echo "Found interface: \$IFACE"
+
+# Create a simple netplan configuration
+echo "Creating netplan configuration..."
+cat > /tmp/01-netcfg.yaml << NETPLAN
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    \${IFACE}:
+      dhcp4: no
+      addresses: [${node_ip}/24]
+      routes:
+        - to: default
+          via: 192.168.7.1
+      nameservers:
+        addresses: [8.8.8.8, 8.8.4.4]
+NETPLAN
+
+sudo mv /tmp/01-netcfg.yaml /etc/netplan/01-netcfg.yaml
+sudo chmod 600 /etc/netplan/01-netcfg.yaml
+
+# Create rc.local script to ensure network comes up on boot
+echo "Creating network startup script..."
+cat > /tmp/rc.local << 'RCLOCAL'
+#!/bin/bash
+# Wait for network interface
+sleep 5
+
+# Get interface name
+IFACE=\$(ip link | grep -v lo | grep -E "ens|enp|eth" | head -1 | cut -d: -f2 | tr -d ' ')
+
+if [ -n "\$IFACE" ]; then
+    # Bring interface up
+    ip link set \$IFACE up
+    
+    # Apply static IP
+    ip addr flush dev \$IFACE
+    ip addr add ${node_ip}/24 dev \$IFACE
+    ip link set \$IFACE up
+    
+    # Add default route
+    ip route del default 2>/dev/null || true
+    ip route add default via 192.168.7.1
+    
+    # Try netplan apply (may fail but that's ok)
+    netplan apply 2>/dev/null || true
+fi
+
+exit 0
+RCLOCAL
+
+sudo mv /tmp/rc.local /etc/rc.local
+sudo chmod +x /etc/rc.local
+
+# Enable rc-local service
+sudo systemctl enable rc-local 2>/dev/null || true
+
+# Set hostname
+sudo hostnamectl set-hostname ${node_name}
+
+# Configure hosts file
+echo "Configuring hosts file..."
+sudo tee /etc/hosts > /dev/null << HOSTS
+127.0.0.1 localhost
+${CONTROLLER_IP} slurm-controller controller
+${NODE1_IP} node1
+${NODE2_IP} node2
+HOSTS
+
+# Configure SSH
+echo "Configuring SSH for password authentication..."
+sudo sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+sudo systemctl restart ssh
+
+echo "Network configuration completed for ${node_name}"
+EOF
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to configure network settings in ${node_name}.${NC}"
+        return 1
+    fi
+    
+    # Shutdown the VM to apply network changes
+    echo -e "${BLUE}Shutting down ${node_name} to apply network changes...${NC}"
+    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no -p ${ssh_port} "${VM_USERNAME}@localhost" "sudo poweroff"
+    
+    # Wait for VM to shutdown
+    sleep 20
+    
+    # PHASE 3: Start node VM with virtual switch networking
+    echo -e "${BLUE}PHASE 3: Starting ${node_name} with virtual switch networking${NC}"
+    
+    # Create node VM script with TAP networking - modified to avoid password prompts
+    local node_tap_script="${TMP_DIR}/start_${node_name}_tap.sh"
+    cat > "${node_tap_script}" <<EOF
+#!/bin/bash
+echo "Starting ${node_name} with virtual switch networking..."
+
+export QEMU_AUDIO_DRV=none
+
+# Run QEMU with TAP networking (removed sudo from exec line)
+qemu-system-x86_64 -m 4096 -smp 4 \\
+    -enable-kvm \\
+    -cpu host \\
+    -drive file="${node_image}",format=qcow2 \\
     -netdev tap,id=net0,ifname=tap${node_num},script=no,downscript=no \\
     -device virtio-net-pci,netdev=net0,mac=${node_mac} \\
     -nographic \\
     -serial mon:stdio \\
     -name "slurm-${node_name}"
 EOF
-    chmod +x "${node_script}"
+    chmod +x "${node_tap_script}"
     
-    # Start node VM
-    echo -e "${BLUE}Starting ${node_name} VM in xterm...${NC}"
-    xterm -title "Slurm ${node_name}" -e "${node_script}" &
+    # Set TAP permissions properly before starting VM
+    echo -e "${BLUE}Setting proper permissions for TAP devices...${NC}"
+    sudo ip tuntap add dev tap${node_num} mode tap user $(whoami)
+    sudo ip link set dev tap${node_num} up
+    sudo ovs-vsctl --may-exist add-port $BRIDGE_NAME tap${node_num}
+    sudo chown $(whoami) /dev/net/tun
     
-    # Wait for VM to boot and network to be ready
-    echo -e "${BLUE}Waiting for ${node_name} VM to boot and be accessible...${NC}"
-    for i in {1..60}; do
-        if ping -c 1 -W 2 $node_ip >/dev/null 2>&1; then
-            echo -e "${GREEN}${node_name} VM is accessible at ${node_ip}${NC}"
+    # Start node VM with TAP networking
+    echo -e "${BLUE}Starting ${node_name} with virtual switch networking...${NC}"
+    xterm -title "Slurm ${node_name}" -e "${node_tap_script}" &
+    
+    # Wait for VM to boot with the new network
+    echo -e "${BLUE}Waiting for ${node_name} to boot with virtual switch networking...${NC}"
+    sleep 10
+    
+    # PHASE 4: Verify connectivity using direct IP
+    echo -e "${BLUE}PHASE 4: Verifying connectivity to ${node_name}${NC}"
+    
+    # Wait for ping to succeed
+    echo -e "${BLUE}Checking ping connectivity to ${node_ip}...${NC}"
+    for i in {1..20}; do
+        echo -e "${YELLOW}Ping attempt ${i}/20...${NC}"
+        if ping -c 1 -W 2 "${node_ip}" > /dev/null 2>&1; then
+            echo -e "${GREEN}Successfully pinged ${node_name} at ${node_ip}${NC}"
             break
         fi
-        sleep 5
-        if [ $i -eq 60 ]; then
-            echo -e "${RED}Timed out waiting for ${node_name} VM to be accessible.${NC}"
+        
+        if [ $i -eq 20 ]; then
+            echo -e "${RED}Failed to ping ${node_name} after 20 attempts.${NC}"
             return 1
         fi
+        
+        sleep 5
     done
     
-    # Wait for SSH to be available
-    for i in {1..30}; do
-        if nc -z -w 2 $node_ip 22; then
-            echo -e "${GREEN}SSH is available on ${node_name}${NC}"
+    # Wait for SSH to be available on direct IP
+    echo -e "${BLUE}Checking SSH connectivity to ${node_ip}...${NC}"
+    for i in {1..20}; do
+        echo -e "${YELLOW}SSH check attempt ${i}/20...${NC}"
+        if nc -z -w 2 "${node_ip}" 22; then
+            echo -e "${GREEN}SSH port is open on ${node_name}${NC}"
+            sleep 10  # Give SSH service a bit more time to fully initialize
             break
         fi
-        sleep 5
-        if [ $i -eq 30 ]; then
-            echo -e "${RED}Timed out waiting for SSH on ${node_name}.${NC}"
+        
+        if [ $i -eq 20 ]; then
+            echo -e "${RED}SSH port not open on ${node_name} after 20 attempts.${NC}"
             return 1
         fi
+        
+        sleep 5
     done
+    
+    # PHASE 5: Provision compute node
+    echo -e "${BLUE}PHASE 5: Provisioning ${node_name}${NC}"
     
     # Copy scripts to compute node
     echo -e "${BLUE}Copying scripts to ${node_name}...${NC}"
@@ -850,6 +1106,97 @@ EOF
     fi
 }
 
+# Function to setup virtual switch using Open vSwitch
+setup_virtual_switch() {
+    SWITCH_NAME="vswitch0"
+    INTERNAL_PORT="vswitch0-int"  # Shortened to fit 15-char limit
+    
+    echo -e "${BLUE}Setting up Open vSwitch virtual switch ${SWITCH_NAME} with internet access...${NC}"
+    
+    # Install Open vSwitch if not already installed
+    if ! command -v ovs-vsctl &> /dev/null; then
+        echo -e "${YELLOW}Installing Open vSwitch...${NC}"
+        sudo apt-get update
+        sudo apt-get install -y openvswitch-switch openvswitch-common
+        sudo systemctl start openvswitch-switch
+        sudo systemctl enable openvswitch-switch
+    fi
+    
+    # Remove existing switch if it exists
+    if sudo ovs-vsctl br-exists "${SWITCH_NAME}" 2>/dev/null; then
+        echo -e "${YELLOW}Removing existing virtual switch...${NC}"
+        sudo ovs-vsctl del-br "${SWITCH_NAME}"
+        sleep 2
+    fi
+    
+    # Find the default network interface
+    echo -e "${BLUE}Finding default internet interface...${NC}"
+    DEFAULT_IFACE=$(ip route show default | grep -Eo 'dev [^ ]+' | cut -d ' ' -f 2)
+    if [ -z "$DEFAULT_IFACE" ]; then
+        echo -e "${RED}Failed to determine default internet interface. Cannot continue.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}Using ${DEFAULT_IFACE} as the internet-connected interface.${NC}"
+    
+    # Create virtual switch
+    echo -e "${BLUE}Creating virtual switch ${SWITCH_NAME}...${NC}"
+    sudo ovs-vsctl add-br "${SWITCH_NAME}"
+    
+    # Create internal port for host connectivity with shorter name
+    echo -e "${BLUE}Creating internal port for host connectivity...${NC}"
+    sudo ovs-vsctl add-port "${SWITCH_NAME}" "${INTERNAL_PORT}" -- set interface "${INTERNAL_PORT}" type=internal
+    
+    # Wait for interface to be created
+    sleep 2
+    
+    # Configure the internal port
+    sudo ip link set "${INTERNAL_PORT}" up
+    sudo ip addr add 192.168.7.1/24 dev "${INTERNAL_PORT}"
+    
+    # Create TAP interfaces for VMs (3 nodes: controller, node1, node2)
+    echo -e "${BLUE}Creating TAP interfaces for VMs...${NC}"
+    for i in 0 1 2; do
+        TAP_NAME="tap${i}"
+        # Remove if exists
+        sudo ip link delete "${TAP_NAME}" 2>/dev/null || true
+        # Create new TAP interface
+        sudo ip tuntap add mode tap "${TAP_NAME}"
+        sudo ip link set "${TAP_NAME}" up
+        # Add TAP to virtual switch
+        sudo ovs-vsctl add-port "${SWITCH_NAME}" "${TAP_NAME}"
+    done
+    
+    # Set up NAT for internet access
+    echo -e "${BLUE}Setting up NAT for internet access...${NC}"
+    
+    # Clear existing NAT rules
+    sudo iptables -t nat -D POSTROUTING -s 192.168.7.0/24 -j MASQUERADE 2>/dev/null || true
+    
+    # Add NAT rule
+    sudo iptables -t nat -A POSTROUTING -s 192.168.7.0/24 -o "${DEFAULT_IFACE}" -j MASQUERADE
+    
+    # Allow forwarding using the shortened interface name
+    sudo iptables -D FORWARD -i "${INTERNAL_PORT}" -o "${DEFAULT_IFACE}" -j ACCEPT 2>/dev/null || true
+    sudo iptables -A FORWARD -i "${INTERNAL_PORT}" -o "${DEFAULT_IFACE}" -j ACCEPT
+    
+    sudo iptables -D FORWARD -i "${DEFAULT_IFACE}" -o "${INTERNAL_PORT}" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    sudo iptables -A FORWARD -i "${DEFAULT_IFACE}" -o "${INTERNAL_PORT}" -m state --state RELATED,ESTABLISHED -j ACCEPT
+    
+    # Enable IP forwarding
+    echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
+    sudo sysctl -w net.ipv4.ip_forward=1
+    
+    # Verify internal interface is up
+    echo -e "${BLUE}Verifying internal interface configuration...${NC}"
+    ip addr show "${INTERNAL_PORT}"
+    
+    # Show virtual switch configuration
+    echo -e "${BLUE}Virtual switch configuration:${NC}"
+    sudo ovs-vsctl show
+    
+    echo -e "${GREEN}Virtual switch setup completed.${NC}"
+}
+
 # Main script logic
 case "${1:-build}" in
     build-base)
@@ -866,6 +1213,7 @@ case "${1:-build}" in
         ;;
     build)
         echo -e "${GREEN}Building Complete QEMU Slurm Cluster${NC}"
+        
         # Step 1: Build base image if it doesn't exist
         if ! check_image "$BASE_VM_IMAGE"; then
             echo -e "${YELLOW}Base image not found. Building it first...${NC}"
@@ -873,13 +1221,17 @@ case "${1:-build}" in
                 echo -e "${RED}Failed to build base image. Cannot continue.${NC}"
                 exit 1
             }
+            echo -e "${GREEN}✅ Base image created successfully: ${BASE_VM_IMAGE}${NC}"
+            echo -e "${BLUE}This image contains Slurm binaries and all dependencies${NC}"
         else
             echo -e "${GREEN}Using existing base image: ${BASE_VM_IMAGE}${NC}"
         fi
         
-        # Step 2: Create VM images (controller and compute nodes)
+        # Step 2: Create VM images (controller and compute nodes) from the base image
+        echo -e "${BLUE}Creating controller and compute node VMs from base image...${NC}"
         create_controller
         create_compute_nodes
+        echo -e "${GREEN}✅ Created controller and compute node images from base image${NC}"
         
         # Step 3: Start controller and run setup-controller.sh inside VM
         echo -e "${BLUE}Starting and provisioning controller VM...${NC}"

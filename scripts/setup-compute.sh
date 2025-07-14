@@ -8,9 +8,9 @@ NODE_ID=$1
 echo "Setting up Slurm Compute Node ${NODE_ID}..."
 
 # Add host entries (moved from Vagrantfile)
-grep -q "slurm-controller" /etc/hosts || echo "192.168.121.10 slurm-controller controller" >> /etc/hosts
-grep -q "node1" /etc/hosts || echo "192.168.121.11 node1" >> /etc/hosts
-grep -q "node2" /etc/hosts || echo "192.168.121.12 node2" >> /etc/hosts
+grep -q "slurm-controller" /etc/hosts || echo "192.168.7.10 slurm-controller controller" >> /etc/hosts
+grep -q "node1" /etc/hosts || echo "192.168.7.11 node1" >> /etc/hosts
+grep -q "node2" /etc/hosts || echo "192.168.7.12 node2" >> /etc/hosts
 
 # Set hostname
 hostnamectl set-hostname node${NODE_ID}
@@ -164,6 +164,19 @@ if ! systemctl start slurmd; then
     echo "=== Testing manual slurmd run ==="
     timeout 10 /opt/slurm/sbin/slurmd -D -vvv || true
     exit 1
+fi
+
+# Add the controller to known hosts for passwordless SSH
+if [ -f /shared/ssh/id_rsa.pub ]; then
+    mkdir -p ~/.ssh
+    cat /shared/ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+    chmod 600 ~/.ssh/authorized_keys
+fi
+
+# Ensure proper NFS server configuration in exports file
+if [ -f /etc/exports ]; then
+    sed -i 's/192.168.121.0\/24/192.168.7.0\/24/g' /etc/exports
+    exportfs -ra 2>/dev/null || true
 fi
 
 echo "Slurm Compute Node ${NODE_ID} setup completed!"

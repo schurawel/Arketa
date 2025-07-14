@@ -33,27 +33,31 @@ help: ## 📋 Show this help message
 	@echo "======================================"
 	@echo ""
 	@echo "$(GREEN)🚀 Getting Started:$(NC)"
-	@echo "  $(BOLD)make setup-repos$(NC) - Clone required repositories (auto-run by other targets)"
-	@echo "  $(BOLD)make build-base$(NC)  - Create base box with Slurm pre-compiled (do this first)"
-	@echo "  $(BOLD)make cluster$(NC)     - Complete cluster setup using base box"
-	@echo "  $(BOLD)make cluster-full$(NC) - Complete cluster setup from scratch (slower)"
-	@echo "  $(BOLD)make test$(NC)        - Run all sample jobs"
-	@echo "  $(BOLD)make test-and-wait$(NC) - Run tests and wait for completion with results"
-	@echo "  $(BOLD)make connect$(NC)     - SSH to controller node"
-	@echo ""
-	@echo "$(YELLOW)🏗️ Bare Metal Deployment (Independent):$(NC)"
-	@echo "  $(BOLD)make metal$(NC)       - Create custom Ubuntu ISO for bare metal deployment"
-	@echo "  $(BOLD)make sim-metal$(NC)   - Simulate bare metal installation with QEMU"
-	@echo "  $(BOLD)make metal-clean$(NC) - Clean up ISO workspace and generated files"
+	@echo "  $(BOLD)make setup-repos$(NC)      - Clone required repositories (auto-run by other targets)"
+	@echo "  $(BOLD)make build-base$(NC)       - Create base box with Slurm pre-compiled (do this first)"
+	@echo "  $(BOLD)make cluster$(NC)          - Complete cluster setup using base box (Vagrant)"
+	@echo "  $(BOLD)make q-cluster$(NC)        - Build and start QEMU-based Slurm cluster"
+	@echo "  $(BOLD)make q-cluster-test$(NC)   - Run test jobs on QEMU cluster"
+	@echo "  $(BOLD)make test$(NC)             - Run all sample jobs (Vagrant)"
+	@echo "  $(BOLD)make test-and-wait$(NC)    - Run tests and wait for completion with results"
+	@echo "  $(BOLD)make connect$(NC)          - SSH to controller node"
 	@echo ""
 	@echo "$(BLUE)📊 Cluster Management:$(NC)"
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  $(BOLD)%-15s$(NC) %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  $(BOLD)%-20s$(NC) %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
 	@echo "$(YELLOW)💡 Vagrant Workflow:$(NC)"
 	@echo "  make setup-repos      # Clone repositories (auto-run by other targets)"
 	@echo "  make build-base       # Build once (takes ~10-15 min)"
 	@echo "  make cluster          # Deploy fast cluster (~2-3 min)"
 	@echo "  make test-and-wait    # Test with full monitoring"
+	@echo ""
+	@echo "$(BLUE)💡 QEMU Workflow:$(NC)"
+	@echo "  make q-cluster        # Build and start QEMU cluster"
+	@echo "  make q-cluster-test   # Run test jobs on QEMU cluster"
+	@echo "  make q-cluster-status # Show QEMU cluster status"
+	@echo "  make q-cluster-connect# SSH to QEMU controller"
+	@echo "  make q-cluster-clean  # Remove QEMU cluster VMs (keep base image)"
+	@echo "  make q-cluster-clean-all # Remove QEMU cluster and base image"
 	@echo ""
 	@echo "$(YELLOW)🏗️ Bare Metal Workflow:$(NC)"
 	@echo "  make metal            # Create custom Ubuntu ISO (independent)"
@@ -486,7 +490,34 @@ q-cluster-connect: ## 🔌 SSH to QEMU cluster controller
 	@echo "$(BLUE)[INFO]$(NC) Connecting to QEMU cluster controller..."
 	@ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10
 
-q-cluster-test: ## 🧪 Run tests on QEMU cluster
-	@echo "$(BLUE)[INFO]$(NC) Running tests on QEMU cluster..."
-	@ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "cd ~/sample-jobs && for job in *.sh; do echo 'Submitting $$job'; sbatch $$job; done"
-	@echo "$(GREEN)[SUCCESS]$(NC) All test jobs submitted."
+q-cluster-test: ## 🧪 Run test jobs on the QEMU cluster
+	@echo "$(BLUE)[INFO]$(NC) Running test jobs on QEMU cluster..."
+	@echo "$(BLUE)[INFO]$(NC) Checking controller VM connectivity..."
+	@if ! ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
+		echo "$(RED)[ERROR]$(NC) Cannot ping controller at 192.168.7.10. Is the cluster running?"; \
+		echo "$(YELLOW)[TIP]$(NC) Start cluster with: make q-cluster"; \
+		exit 1; \
+	fi
+	@echo "$(BLUE)[INFO]$(NC) Copying sample jobs to controller VM..."
+	@sshpass -p "ubuntu" scp -o StrictHostKeyChecking=no -r ./sample-jobs/* ubuntu@192.168.7.10:~/sample-jobs/ || { \
+		echo "$(RED)[ERROR]$(NC) Failed to copy sample jobs to controller VM"; \
+		exit 1; \
+	}
+	@echo "$(BLUE)[INFO]$(NC) Submitting test jobs on controller VM..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "mkdir -p ~/sample-jobs-output"
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "cd ~/sample-jobs && chmod +x *.sh && echo 'Submitting jobs...' && for f in *.sh; do echo \"Submitting job: \$$f\"; sbatch \"\$$f\"; done"
+	@echo "$(BLUE)[INFO]$(NC) Checking job status..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "squeue"
+	@echo "$(BLUE)[INFO]$(NC) Waiting for jobs to complete (120 second timeout)..."
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "timeout 120s bash -c 'while squeue | grep -q ubuntu; do echo -n \".\"; sleep 2; done; echo \"\"'" || { \
+		echo ""; \
+		echo "$(YELLOW)[WARNING]$(NC) Not all jobs completed within the timeout period."; \
+		echo "$(BLUE)[INFO]$(NC) Current job status:"; \
+		sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "squeue"; \
+		echo "$(BLUE)[INFO]$(NC) You can check status later with: ssh ubuntu@192.168.7.10 squeue"; \
+	}
+	@echo "$(BLUE)[INFO]$(NC) Job results (completed jobs only):"
+	@sshpass -p "ubuntu" ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "find ~/ -name \"slurm-*.out\" -type f -exec ls -la {} \; && echo \"Recent job outputs:\" && find ~/ -name \"slurm-*.out\" -type f -exec cat {} \;"
+	@echo "$(GREEN)[SUCCESS]$(NC) Sample jobs have been submitted to the QEMU cluster."
+	@echo "$(BLUE)[INFO]$(NC) To check job status: ssh ubuntu@192.168.7.10 squeue"
+	@echo "$(BLUE)[INFO]$(NC) To view job outputs: ssh ubuntu@192.168.7.10 \"cat slurm-*.out\""

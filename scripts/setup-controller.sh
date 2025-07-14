@@ -6,9 +6,9 @@ set -e
 echo "Setting up Slurm Controller Node..."
 
 # Add host entries (moved from Vagrantfile)
-grep -q "slurm-controller" /etc/hosts || echo "192.168.121.10 slurm-controller controller" >> /etc/hosts
-grep -q "node1" /etc/hosts || echo "192.168.121.11 node1" >> /etc/hosts
-grep -q "node2" /etc/hosts || echo "192.168.121.12 node2" >> /etc/hosts
+grep -q "slurm-controller" /etc/hosts || echo "192.168.7.10 slurm-controller controller" >> /etc/hosts
+grep -q "node1" /etc/hosts || echo "192.168.7.11 node1" >> /etc/hosts
+grep -q "node2" /etc/hosts || echo "192.168.7.12 node2" >> /etc/hosts
 
 # Set hostname
 hostnamectl set-hostname slurm-controller
@@ -23,11 +23,19 @@ mkdir -p /shared
 chown slurm:slurm /shared
 chmod 755 /shared
 
-# Configure NFS export for shared directory
-grep -q "/shared 192.168.121.0/24" /etc/exports || echo "/shared 192.168.121.0/24(rw,sync,no_subtree_check,no_root_squash)" >> /etc/exports
+# Configure NFS export for shared directory - FIXED NETWORK ADDRESS
+grep -q "/shared 192.168.7.0/24" /etc/exports || echo "/shared 192.168.7.0/24(rw,sync,no_subtree_check,no_root_squash)" > /etc/exports
+# Also remove old exports if they exist
+sed -i '/\/shared 192.168.121.0\/24/d' /etc/exports
+
+# Enable and restart NFS server with proper settings
 systemctl enable nfs-kernel-server
-systemctl start nfs-kernel-server
-exportfs -a
+systemctl restart nfs-kernel-server
+exportfs -ra
+
+# Verify exports are configured correctly
+echo "Verifying NFS exports..."
+exportfs -v
 
 # Source the Slurm environment (should be available from base setup)
 if ! grep -q "/opt/slurm/bin" /etc/environment; then
@@ -228,13 +236,20 @@ if ! systemctl start slurmd; then
 fi
 
 # Run the setup script for the Slurm Database Daemon
-/home/vagrant/scripts/setup-slurmdbd.sh
+if [ -f "/home/ubuntu/scripts/setup-slurmdbd.sh" ]; then
+    /home/ubuntu/scripts/setup-slurmdbd.sh
+elif [ -f "/home/vagrant/scripts/setup-slurmdbd.sh" ]; then
+    /home/vagrant/scripts/setup-slurmdbd.sh
+else
+    echo "ERROR: setup-slurmdbd.sh script not found in expected locations"
+    exit 1
+fi
 
 # Install and configure Open OnDemand
 echo "🌐 Setting up Open OnDemand..."
-if [ -f /home/vagrant/scripts/setup-ondemand.sh ]; then
-  chmod +x /home/vagrant/scripts/setup-ondemand.sh
-  /home/vagrant/scripts/setup-ondemand.sh
+if [ -f /home/ubuntu/scripts/setup-ondemand.sh ]; then
+  chmod +x /home/ubuntu/scripts/setup-ondemand.sh
+  /home/ubuntu/scripts/setup-ondemand.sh
   echo "✅ Open OnDemand setup complete."
   echo "👉 Access the portal at http://localhost:8080"
 else
@@ -243,9 +258,9 @@ fi
 
 # Install and configure slurm-web from source
 echo "🌐 Setting up slurm-web from source..."
-if [ -f /home/vagrant/scripts/setup-slurm-web.sh ]; then
-  chmod +x /home/vagrant/scripts/setup-slurm-web.sh
-  /home/vagrant/scripts/setup-slurm-web.sh
+if [ -f /home/ubuntu/scripts/setup-slurm-web.sh ]; then
+  chmod +x /home/ubuntu/scripts/setup-slurm-web.sh
+  /home/ubuntu/scripts/setup-slurm-web.sh
   echo "✅ slurm-web setup complete."
   echo "👉 Access the portal at http://localhost:8081"
 else

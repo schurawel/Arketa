@@ -240,14 +240,49 @@ install_slurm_from_source() {
     log "Slurm version: $(/opt/slurm/sbin/slurmctld -V 2>/dev/null | head -1 || echo 'Slurm installed successfully')"
 }
 
+# Function to clone and install Slurm from Git repository
+install_slurm_from_git() {
+    local git_url="https://github.com/SchedMD/slurm.git"
+    local git_branch="master"  # You can specify a specific version/tag here
+    local temp_dir="/tmp/slurm-git-src"
+    
+    log "Cloning Slurm from Git repository..."
+    
+    # Install git if not already installed
+    if ! command -v git &>/dev/null; then
+        log "Installing git..."
+        apt-get install -y git
+    fi
+    
+    # Create temp directory and clone repo
+    mkdir -p "$temp_dir"
+    if [ -d "$temp_dir/.git" ]; then
+        log "Updating existing Slurm git repository..."
+        cd "$temp_dir"
+        git fetch --all
+        git checkout "$git_branch"
+        git pull
+    else
+        log "Cloning fresh Slurm git repository..."
+        git clone --depth=1 -b "$git_branch" "$git_url" "$temp_dir"
+    fi
+    
+    if [ $? -ne 0 ]; then
+        error "Failed to clone Slurm repository. Check your internet connection."
+    fi
+    
+    log "Successfully cloned Slurm repository"
+    install_slurm_from_source "$temp_dir"
+}
+
 # Check if Slurm source is available and install it
 if [ -d "/home/vagrant/slurm-src" ]; then
     install_slurm_from_source "/home/vagrant/slurm-src"
 elif [ -d "/opt/slurm-src" ]; then
     install_slurm_from_source "/opt/slurm-src"
 else
-    warn "Slurm source not found - skipping Slurm build"
-    warn "Slurm will need to be installed separately"
+    log "Slurm source not found locally - attempting to clone from Git..."
+    install_slurm_from_git
 fi
 
 # Clean up for imaging (when preparing base images)

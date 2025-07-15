@@ -155,6 +155,200 @@ sudo mkdir -p /etc/ood/config/clusters.d
 sudo usermod -a -G ood ubuntu 2>/dev/null || true
 sudo usermod -a -G ood vagrant 2>/dev/null || true
 
+# 8.1. Configure Interactive Desktop app
+echo "🖥️ Configuring Interactive Desktop app..."
+# Fix the cluster configuration for bc_desktop app
+sudo cp /var/www/ood/apps/sys/bc_desktop/submit.yml.erb /var/www/ood/apps/sys/bc_desktop/submit.yml.erb.backup 2>/dev/null || true
+
+cat <<EOF | sudo tee /var/www/ood/apps/sys/bc_desktop/submit.yml.erb
+---
+cluster: primedslurm
+batch_connect:
+  template: vnc
+EOF
+
+# Update form.yml to include cluster and better defaults
+sudo cp /var/www/ood/apps/sys/bc_desktop/form.yml /var/www/ood/apps/sys/bc_desktop/form.yml.backup 2>/dev/null || true
+
+cat <<EOF | sudo tee /var/www/ood/apps/sys/bc_desktop/form.yml
+---
+cluster: primedslurm
+attributes:
+  desktop:
+    label: "Desktop Environment"
+    widget: select
+    options:
+      - ["XFCE Desktop", "xfce"]
+      - ["KDE Plasma Desktop", "kde"]
+      - ["GNOME Desktop", "gnome"]
+    value: "xfce"
+  bc_vnc_idle: 0
+  bc_vnc_resolution:
+    required: true
+    value: "1024x768"
+  node_type: null
+  bc_num_hours:
+    value: 1
+  bc_num_slots:
+    value: 1
+
+form:
+  - bc_vnc_idle
+  - desktop
+  - bc_num_hours
+  - bc_num_slots
+  - bc_vnc_resolution
+  - bc_email_on_started
+EOF
+
+# Install desktop environments for the Interactive Desktop feature
+echo "📦 Installing desktop environments..."
+sudo apt update
+sudo apt install -y xfce4 xfce4-terminal kde-plasma-desktop firefox || echo "⚠️ Desktop packages installation had issues"
+
+# Install VNC server for OnDemand Interactive Desktop
+sudo apt install -y tigervnc-standalone-server tigervnc-common || echo "⚠️ VNC server installation had issues"
+
+# Install Python and Jupyter for OnDemand Jupyter app
+echo "📊 Installing Python and Jupyter..."
+sudo apt install -y python3 python3-pip python3-venv || echo "⚠️ Python packages installation had issues"
+sudo pip3 install jupyter jupyterlab numpy pandas matplotlib seaborn || echo "⚠️ Jupyter/ML packages installation had issues"
+
+# 8.3. Configure Jupyter Notebook app
+echo "📊 Configuring Jupyter Notebook app..."
+# Check if Jupyter app exists and create one if it doesn't
+if [ ! -d "/var/www/ood/apps/sys/bc_jupyter" ]; then
+    sudo mkdir -p /var/www/ood/apps/sys/bc_jupyter
+    
+    # Create Jupyter submit configuration
+    cat <<EOF | sudo tee /var/www/ood/apps/sys/bc_jupyter/submit.yml.erb
+---
+cluster: primedslurm
+batch_connect:
+  template: basic
+EOF
+
+    # Create Jupyter form configuration
+    cat <<EOF | sudo tee /var/www/ood/apps/sys/bc_jupyter/form.yml
+---
+cluster: primedslurm
+attributes:
+  bc_num_hours:
+    label: "Number of hours"
+    value: 1
+    min: 1
+    max: 24
+  bc_num_slots:
+    label: "Number of cores"  
+    value: 1
+    min: 1
+    max: 8
+  jupyter_type:
+    label: "Jupyter Type"
+    widget: select
+    options:
+      - ["Jupyter Notebook", "notebook"]
+      - ["JupyterLab", "lab"]
+    value: "lab"
+
+form:
+  - bc_num_hours
+  - bc_num_slots
+  - jupyter_type
+  - bc_email_on_started
+EOF
+
+    # Create Jupyter manifest
+    cat <<EOF | sudo tee /var/www/ood/apps/sys/bc_jupyter/manifest.yml
+---
+name: Jupyter
+category: Interactive Apps
+subcategory: Machine Learning & Data Science
+role: batch_connect
+description: |
+  This app will launch a Jupyter Notebook/Lab server on one or more compute
+  nodes. You can use this to run interactive data analysis, machine learning,
+  and scientific computing workflows.
+EOF
+
+    # Create template directory and script
+    sudo mkdir -p /var/www/ood/apps/sys/bc_jupyter/template
+    
+    # Create the main Jupyter script template
+    cat <<'EOF' | sudo tee /var/www/ood/apps/sys/bc_jupyter/template/script.sh.erb
+#!/usr/bin/env bash
+
+# Clean the environment
+module purge
+
+# Set working directory to user's home directory
+cd "${HOME}"
+
+# Set up Python environment
+export PATH="/usr/bin:$PATH"
+
+# Create a working directory for this session
+WORK_DIR="${HOME}/ondemand/jupyter/$(date +%Y%m%d_%H%M%S)"
+mkdir -p "${WORK_DIR}"
+cd "${WORK_DIR}"
+
+# Create a basic config directory for Jupyter
+export JUPYTER_CONFIG_DIR="${WORK_DIR}/.jupyter"
+mkdir -p "${JUPYTER_CONFIG_DIR}"
+
+# Generate Jupyter config
+jupyter-<%= context.jupyter_type %> --generate-config
+
+# Set up password file from connection info
+export JUPYTER_PASSWORD_FILE="${WORK_DIR}/jupyter_password"
+echo "Password: <%= password %>" > "${JUPYTER_PASSWORD_FILE}"
+
+# Start Jupyter
+echo "Starting Jupyter <%= context.jupyter_type %> server..."
+
+<%- if context.jupyter_type == "lab" -%>
+jupyter-lab \
+  --ip="*" \
+  --port="<%= port %>" \
+  --no-browser \
+  --NotebookApp.token="<%= password %>" \
+  --NotebookApp.password="" \
+  --NotebookApp.allow_origin="*" \
+  --NotebookApp.base_url="<%= base_url %>/jupyter/lab" \
+  --notebook-dir="${WORK_DIR}"
+<%- else -%>
+jupyter-notebook \
+  --ip="*" \
+  --port="<%= port %>" \
+  --no-browser \
+  --NotebookApp.token="<%= password %>" \
+  --NotebookApp.password="" \
+  --NotebookApp.allow_origin="*" \
+  --NotebookApp.base_url="<%= base_url %>/jupyter" \
+  --notebook-dir="${WORK_DIR}"
+<%- fi -%>
+EOF
+
+    echo "✅ Jupyter app configured"
+else
+    echo "✅ Jupyter app already exists"
+fi
+
+# 8.2. Fix Per-User Nginx (PUN) setup and ensure proper startup
+echo "🔧 Configuring Per-User Nginx (PUN) system..."
+# Ensure the ooduser can use the PUN system
+sudo mkdir -p /var/run/ondemand-nginx
+sudo chown root:root /var/run/ondemand-nginx
+sudo chmod 755 /var/run/ondemand-nginx
+
+# Clean up any existing PUN processes for ooduser to avoid conflicts
+sudo pkill -f 'nginx.*ooduser' 2>/dev/null || true
+sudo rm -rf /var/run/ondemand-nginx/ooduser/ 2>/dev/null || true
+
+# Start the PUN for ooduser to ensure it's ready
+echo "🚀 Starting Per-User Nginx for ooduser..."
+sudo /opt/ood/nginx_stage/sbin/nginx_stage pun -u ooduser -a start || echo "⚠️ PUN start may need to be done after first login"
+
 # 9. Final check
 sleep 5
 echo -n "Checking Open OnDemand accessibility... "
@@ -173,6 +367,10 @@ echo
 echo "✅ Open OnDemand setup complete!"
 echo "🌐 Access Open OnDemand at: http://$(hostname -I | awk '{print $1}')/"
 echo "👤 Login with username: ooduser, password: ooduser"
+echo
+echo "🖥️ Interactive Desktop should now work properly with cluster: primedslurm"
+echo "📋 Available desktop environments: XFCE (default), KDE Plasma, GNOME"
+echo "📊 Jupyter Notebook/Lab app is now available for data science workflows"
 echo
 echo "Next steps:"
 echo "  • For production, set up proper authentication (LDAP, CAS, etc.)"

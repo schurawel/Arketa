@@ -18,7 +18,7 @@ hostnamectl set-hostname node${NODE_ID}
 # Install NFS client and setup shared directory (moved from Vagrantfile)
 echo "Installing NFS client and setting up shared directory..."
 apt-get update
-apt-get install -y nfs-common
+apt-get install -y nfs-common tigervnc-standalone-server tigervnc-common xfce4 xfce4-terminal kde-plasma-desktop firefox
 
 # Mount shared directory and setup fstab
 mkdir -p /shared

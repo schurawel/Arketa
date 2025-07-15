@@ -32,7 +32,7 @@ wait_for_apt_locks 600 || {
     exit 1
 }
 apt-get update
-apt-get install -y nfs-kernel-server
+apt-get install -y nfs-kernel-server tigervnc-standalone-server tigervnc-common xfce4 xfce4-terminal kde-plasma-desktop firefox
 
 # Setup shared directory
 mkdir -p /shared

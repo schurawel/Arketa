@@ -67,6 +67,10 @@ echo "🔐 Setting up basic authentication for testing..."
 sudo mkdir -p /etc/ood/config
 htpasswd -b -c /etc/ood/config/htpasswd ooduser ooduser
 
+# Create corresponding system user
+sudo useradd -m -s /bin/bash ooduser 2>/dev/null || echo "User ooduser already exists"
+echo 'ooduser:ooduser' | sudo chpasswd
+
 # 5. Create a minimal but complete portal configuration
 cat <<'EOF' | sudo tee /etc/ood/config/ood_portal.yml
 ---
@@ -96,13 +100,20 @@ logroot: "/var/log/ondemand"
 errorlog: "error.log"
 accesslog: "access.log"
 
-# Ensure we don't have conflicting server names
-server_aliases: []
+# Allow access by IP address as well as hostname
+server_aliases:
+  - "192.168.7.10"
+  - "localhost"
 EOF
 
 # Create log directory
 sudo mkdir -p /var/log/ondemand
 sudo chown www-data:www-data /var/log/ondemand
+
+# Create proper /public directory symlink
+echo "🔗 Setting up /public directory symlink..."
+sudo rm -rf /public 2>/dev/null || true
+sudo ln -sf /var/www/ood/public /public
 
 # Generate the Apache configuration from the portal config
 echo "🔧 Generating Apache configuration..."

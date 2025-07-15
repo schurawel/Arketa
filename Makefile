@@ -503,3 +503,56 @@ q-cluster-refresh-samples: ## 🔄 Refresh sample jobs on QEMU cluster controlle
 	}
 	@echo "$(GREEN)[SUCCESS]$(NC) Sample jobs have been refreshed on the QEMU cluster controller."
 	@echo "$(BLUE)[INFO]$(NC) Submit jobs with: ssh ubuntu@192.168.7.10 \"cd ~/sample-jobs && sbatch <job-script.sh>\""
+
+# Debug slurm-web installation and configuration
+debug-slurm-web: ## 🔍 Debug slurm-web installation and configuration
+	@echo "$(BLUE)[INFO]$(NC) Investigating slurm-web issues on cluster controller..."
+	@if ! ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
+		echo "$(RED)[ERROR]$(NC) Cannot ping controller at 192.168.7.10. Is the cluster running?"; \
+		echo "$(YELLOW)[TIP]$(NC) Start cluster with: make q-cluster"; \
+		exit 1; \
+	fi
+	@./investigate-slurm-web.sh
+	@echo "$(GREEN)[SUCCESS]$(NC) Slurm-web investigation completed. Check output above for issues and recommendations."
+
+fix-slurm-web: ## 🔧 Re-run slurm-web setup to fix configuration issues
+	@echo "$(BLUE)[INFO]$(NC) Re-running slurm-web setup on cluster controller..."
+	@if ! ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
+		echo "$(RED)[ERROR]$(NC) Cannot ping controller at 192.168.7.10. Is the cluster running?"; \
+		echo "$(YELLOW)[TIP]$(NC) Start cluster with: make q-cluster"; \
+		exit 1; \
+	fi
+	@echo "$(BLUE)[INFO]$(NC) Running updated slurm-web setup script..."
+	@sshpass -p ubuntu ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "sudo /home/ubuntu/scripts/setup-slurm-web.sh"
+	@echo "$(GREEN)[SUCCESS]$(NC) Slurm-web setup completed. Try accessing: http://192.168.7.10:5011"
+
+test-slurm-web-api: ## 🧪 Test slurm-web API endpoints
+	@echo "$(BLUE)[INFO]$(NC) Testing slurm-web API endpoints..."
+	@if ! ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
+		echo "$(RED)[ERROR]$(NC) Cannot ping controller at 192.168.7.10. Is the cluster running?"; \
+		exit 1; \
+	fi
+	@echo "$(BLUE)[TEST]$(NC) Gateway config endpoint..."
+	@curl -s -w "Status: %{http_code}\n" http://192.168.7.10:5011/config.json || echo "$(RED)[FAIL]$(NC) Gateway not responding"
+	@echo "$(BLUE)[TEST]$(NC) Clusters API endpoint..."
+	@curl -s -w "Status: %{http_code}\n" http://192.168.7.10:5011/api/clusters || echo "$(YELLOW)[INFO]$(NC) May require authentication"
+	@echo "$(BLUE)[TEST]$(NC) Service status on controller..."
+	@sshpass -p ubuntu ssh -o StrictHostKeyChecking=no ubuntu@192.168.7.10 "systemctl is-active slurm-web-agent slurm-web-gateway" || echo "$(RED)[FAIL]$(NC) Services not running"
+
+slurm-web: ## 🌐 Open the Slurm-web interface in browser
+	@echo "$(BLUE)[INFO]$(NC) Opening Slurm-web interface..."
+	@if ping -c 1 -W 2 192.168.7.10 > /dev/null 2>&1; then \
+		echo "$(GREEN)[SUCCESS]$(NC) Controller VM is reachable at 192.168.7.10"; \
+		echo "$(BLUE)[INFO]$(NC) Checking if Slurm-web is running..."; \
+		if curl -s http://192.168.7.10:5011 > /dev/null 2>&1; then \
+			echo "$(GREEN)[SUCCESS]$(NC) Slurm-web is running on port 5011"; \
+			xdg-open http://192.168.7.10:5011 2>/dev/null || echo "$(BLUE)[INFO]$(NC) Open http://192.168.7.10:5011 in your browser"; \
+		else \
+			echo "$(YELLOW)[WARNING]$(NC) Slurm-web not responding on port 5011"; \
+			echo "$(BLUE)[INFO]$(NC) Try running setup: ssh ubuntu@192.168.7.10 'sudo /home/ubuntu/scripts/setup-slurm-web.sh'"; \
+		fi; \
+	else \
+		echo "$(RED)[ERROR]$(NC) Cannot reach controller VM at 192.168.7.10"; \
+		echo "$(YELLOW)[TIP]$(NC) Make sure the QEMU cluster is running with: make q-cluster"; \
+	fi
+

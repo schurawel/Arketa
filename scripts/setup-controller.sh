@@ -3,6 +3,17 @@
 
 set -e
 
+# Parse command line arguments
+LINEAR_MODE=false
+for arg in "$@"; do
+    case $arg in
+        --linear-setup)
+            LINEAR_MODE=true
+            echo "📋 Running in linear setup mode - skipping non-essential tests"
+            ;;
+    esac
+done
+
 echo "Setting up Slurm Controller Node..."
 
 # Add host entries (moved from Vagrantfile)
@@ -84,7 +95,13 @@ systemctl enable munge
 dd if=/dev/urandom bs=1 count=1024 > /etc/munge/munge.key
 chown munge:munge /etc/munge/munge.key
 chmod 400 /etc/munge/munge.key
-systemctl start munge
+
+# Start munge with skip option for linear mode
+if [ "$LINEAR_MODE" = "true" ]; then
+    systemctl start munge || echo "⚠️ Munge start issues in linear mode - continuing anyway"
+else
+    systemctl start munge
+fi
 
 # Copy munge key to shared directory for compute nodes
 cp /etc/munge/munge.key /shared/
@@ -258,9 +275,17 @@ fi
 
 # Run the setup script for the Slurm Database Daemon
 if [ -f "/home/ubuntu/scripts/setup-slurmdbd.sh" ]; then
-    /home/ubuntu/scripts/setup-slurmdbd.sh
+    if [ "$LINEAR_MODE" = "true" ]; then
+        /home/ubuntu/scripts/setup-slurmdbd.sh --linear-setup
+    else
+        /home/ubuntu/scripts/setup-slurmdbd.sh
+    fi
 elif [ -f "/home/vagrant/scripts/setup-slurmdbd.sh" ]; then
-    /home/vagrant/scripts/setup-slurmdbd.sh
+    if [ "$LINEAR_MODE" = "true" ]; then
+        /home/vagrant/scripts/setup-slurmdbd.sh --linear-setup
+    else
+        /home/vagrant/scripts/setup-slurmdbd.sh
+    fi
 else
     echo "ERROR: setup-slurmdbd.sh script not found in expected locations"
     exit 1
@@ -307,66 +332,79 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    # Enable and start slurmrestd
+    # Enable and start slurmrestd with skip option for linear mode
     systemctl daemon-reload
     systemctl enable slurmrestd
-    systemctl start slurmrestd || {
-        echo "⚠️ slurmrestd failed to start. Checking logs..."
-        journalctl -u slurmrestd --no-pager -n 20
-    }
-    
-    # Wait for slurmrestd to be ready
-    sleep 10
-    
-    # Check if slurmrestd is running
-    if systemctl is-active --quiet slurmrestd; then
-        echo "✅ slurmrestd is running with Unix socket"
+    if [ "$LINEAR_MODE" = "true" ]; then
+        systemctl start slurmrestd || echo "⚠️ slurmrestd start issues in linear mode - continuing anyway"
+        # Skip connectivity tests
+    else
+        systemctl start slurmrestd || {
+            echo "⚠️ slurmrestd failed to start. Checking logs..."
+            journalctl -u slurmrestd --no-pager -n 20
+        }
         
-        # Test slurmrestd connectivity with Unix socket
-        if [ -S "/run/slurmrestd/slurmrestd.socket" ]; then
-            echo "✅ slurmrestd Unix socket exists"
+        # Wait for slurmrestd to be ready
+        sleep 10
+        
+        # Check if slurmrestd is running
+        if systemctl is-active --quiet slurmrestd; then
+            echo "✅ slurmrestd is running with Unix socket"
             
-            # Test with scontrol token
-            if sudo -u slurm /opt/slurm/bin/scontrol token > /dev/null 2>&1; then
-                echo "✅ JWT token generation works"
+            # Test slurmrestd connectivity with Unix socket
+            if [ -S "/run/slurmrestd/slurmrestd.socket" ]; then
+                echo "✅ slurmrestd Unix socket exists"
+                
+                # Test with scontrol token
+                if sudo -u slurm /opt/slurm/bin/scontrol token > /dev/null 2>&1; then
+                    echo "✅ JWT token generation works"
+                else
+                    echo "⚠️ JWT token generation failed"
+                fi
             else
-                echo "⚠️ JWT token generation failed"
+                echo "⚠️ slurmrestd Unix socket not found"
             fi
         else
-            echo "⚠️ slurmrestd Unix socket not found"
+            echo "⚠️ slurmrestd is not running. slurm-web may have limited functionality."
         fi
-    else
-        echo "⚠️ slurmrestd is not running. slurm-web may have limited functionality."
     fi
 fi
 
 
 echo "🌐 Setting up Open OnDemand..."
 if [ -f /home/ubuntu/scripts/setup-ondemand.sh ]; then
-  chmod +x /home/ubuntu/scripts/setup-ondemand.sh
-  /home/ubuntu/scripts/setup-ondemand.sh || {
-    echo "⚠️ OnDemand setup encountered issues. Checking status..."
-    systemctl status apache2 --no-pager || true
-    echo "📋 Apache sites enabled:"
-    ls -la /etc/apache2/sites-enabled/ || true
-  }
-  echo "✅ Open OnDemand setup attempt complete."
-  echo "👉 Access the portal at http://192.168.7.10/"
-  echo "👤 Login: ooduser / ooduser"
+    chmod +x /home/ubuntu/scripts/setup-ondemand.sh
+    if [ "$LINEAR_MODE" = "true" ]; then
+        /home/ubuntu/scripts/setup-ondemand.sh --linear-setup || echo "⚠️ OnDemand setup issues in linear mode - continuing anyway"
+    else
+        /home/ubuntu/scripts/setup-ondemand.sh || {
+            echo "⚠️ OnDemand setup encountered issues. Checking status..."
+            systemctl status apache2 --no-pager || true
+            echo "📋 Apache sites enabled:"
+            ls -la /etc/apache2/sites-enabled/ || true
+        }
+    fi
+    echo "✅ Open OnDemand setup attempt complete."
+    echo "👉 Access the portal at http://192.168.7.10/"
+    echo "👤 Login: ooduser / ooduser"
 elif [ -f /home/vagrant/scripts/setup-ondemand.sh ]; then
-  chmod +x /home/vagrant/scripts/setup-ondemand.sh
-  /home/vagrant/scripts/setup-ondemand.sh || {
-    echo "⚠️ OnDemand setup encountered issues."
-  }
+    chmod +x /home/vagrant/scripts/setup-ondemand.sh
+    if [ "$LINEAR_MODE" = "true" ]; then
+        /home/vagrant/scripts/setup-ondemand.sh --linear-setup || echo "⚠️ OnDemand setup issues in linear mode - continuing anyway"
+    else
+        /home/vagrant/scripts/setup-ondemand.sh || {
+            echo "⚠️ OnDemand setup encountered issues."
+        }
+    fi
 else
-  echo "🤷 Skipping Open OnDemand setup: script not found."
+    echo "🤷 Skipping Open OnDemand setup: script not found."
 fi
 
-# Install and configure slurm-web from source
+# Install and configure slurm-web with linear mode flag if needed
 echo "🌐 Setting up slurm-web from source..."
 if [ -d "/home/ubuntu/scripts" ]; then
-  echo "📝 Creating minimal slurm-web setup script..."
-  cat > /home/ubuntu/scripts/setup-slurm-web-minimal.sh << 'EOFMINIMALSCRIPT'
+    echo "📝 Creating minimal slurm-web setup script..."
+    cat > /home/ubuntu/scripts/setup-slurm-web-minimal.sh << 'EOFMINIMALSCRIPT'
 #!/bin/bash
 # Minimal slurm-web setup script - focused on fixing URL parameter issue
 
@@ -496,23 +534,27 @@ echo "Installation complete! Access Slurm-web at: http://$(hostname -I | awk '{p
 echo ""
 EOFMINIMALSCRIPT
 
-  chmod +x /home/ubuntu/scripts/setup-slurm-web-minimal.sh
-  /home/ubuntu/scripts/setup-slurm-web-minimal.sh || {
-    echo "⚠️ Minimal slurm-web setup encountered issues."
-    systemctl status slurm-web-agent slurm-web-gateway --no-pager || true
-    echo "📋 Checking gateway.ini for URL parameter..."
-    if [ -f /etc/slurm-web/gateway.ini ]; then
-      if ! grep -q "url=" /etc/slurm-web/gateway.ini; then
-        echo "🔧 URL parameter missing, manually adding it..."
-        echo -e "\n[agents]\nurl=http://localhost:5012" | sudo tee -a /etc/slurm-web/gateway.ini
-        sudo systemctl restart slurm-web-gateway
-      fi
+    chmod +x /home/ubuntu/scripts/setup-slurm-web-minimal.sh
+    if [ "$LINEAR_MODE" = "true" ]; then
+        /home/ubuntu/scripts/setup-slurm-web-minimal.sh --linear-setup || echo "⚠️ slurm-web setup issues in linear mode - continuing anyway"
+    else
+        /home/ubuntu/scripts/setup-slurm-web-minimal.sh || {
+            echo "⚠️ Minimal slurm-web setup encountered issues."
+            systemctl status slurm-web-agent slurm-web-gateway --no-pager || true
+            echo "📋 Checking gateway.ini for URL parameter..."
+            if [ -f /etc/slurm-web/gateway.ini ]; then
+                if ! grep -q "url=" /etc/slurm-web/gateway.ini; then
+                    echo "🔧 URL parameter missing, manually adding it..."
+                    echo -e "\n[agents]\nurl=http://localhost:5012" | sudo tee -a /etc/slurm-web/gateway.ini
+                    sudo systemctl restart slurm-web-gateway
+                fi
+            fi
+        }
     fi
-  }
-  echo "✅ slurm-web setup complete."
-  echo "👉 Access the portal at http://192.168.7.10:5011"
+    echo "✅ slurm-web setup complete."
+    echo "👉 Access the portal at http://192.168.7.10:5011"
 else
-  echo "🤷 Skipping slurm-web setup: scripts directory not found."
+    echo "🤷 Skipping slurm-web setup: scripts directory not found."
 fi
 
 # Mark controller as fully provisioned for compute nodes

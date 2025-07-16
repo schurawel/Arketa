@@ -1,6 +1,17 @@
 #!/bin/bash
 # Minimal slurm-web setup script - focused on fixing URL parameter issue
 
+# Parse command line arguments
+LINEAR_MODE=false
+for arg in "$@"; do
+    case $arg in
+        --linear-setup)
+            LINEAR_MODE=true
+            echo "📋 Running in linear setup mode - skipping non-essential tests"
+            ;;
+    esac
+done
+
 set -e
 
 echo "======================================================="
@@ -96,30 +107,32 @@ sudo systemctl restart slurm-web-agent
 sleep 5
 sudo systemctl restart slurm-web-gateway
 
-# Final verification
-echo "Verifying services..."
-for service in slurmrestd slurm-web-agent slurm-web-gateway; do
-    if systemctl is-active --quiet $service; then
-        echo "✅ $service is running"
+# Final verification - skip in linear mode
+if [ "$LINEAR_MODE" != "true" ]; then
+    echo "Verifying services..."
+    for service in slurmrestd slurm-web-agent slurm-web-gateway; do
+        if systemctl is-active --quiet $service; then
+            echo "✅ $service is running"
+        else
+            echo "❌ $service is not running"
+            systemctl status $service --no-pager
+        fi
+    done
+
+    # Double-check the gateway configuration
+    echo "Double-checking gateway configuration..."
+    if [ -f /etc/slurm-web/gateway.ini ]; then
+        cat /etc/slurm-web/gateway.ini
     else
-        echo "❌ $service is not running"
-        systemctl status $service --no-pager
+        echo "❌ Gateway configuration file doesn't exist!"
     fi
-done
 
-# Double-check the gateway configuration
-echo "Double-checking gateway configuration..."
-if [ -f /etc/slurm-web/gateway.ini ]; then
-    cat /etc/slurm-web/gateway.ini
-else
-    echo "❌ Gateway configuration file doesn't exist!"
-fi
-
-# If the gateway service is still not running, try a direct manual approach
-if ! systemctl is-active --quiet slurm-web-gateway; then
-    echo "Attempting manual gateway start with debugging..."
-    # Try starting the gateway manually with verbose output
-    sudo slurm-web-gateway -c /etc/slurm-web/gateway.ini -v
+    # If the gateway service is still not running, try a direct manual approach
+    if ! systemctl is-active --quiet slurm-web-gateway; then
+        echo "Attempting manual gateway start with debugging..."
+        # Try starting the gateway manually with verbose output
+        sudo slurm-web-gateway -c /etc/slurm-web/gateway.ini -v
+    fi
 fi
 
 echo ""

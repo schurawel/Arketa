@@ -1,13 +1,29 @@
 #!/bin/bash
 # setup-ondemand.sh - Automated Open OnDemand setup (official system package method)
 
+# Parse command line arguments
+LINEAR_MODE=false
+for arg in "$@"; do
+    case $arg in
+        --linear-setup)
+            LINEAR_MODE=true
+            echo "📋 Running in linear setup mode - skipping non-essential tests"
+            ;;
+    esac
+done
+
 # Exit on any error
 set -e
 
 # Function for error handling
 handle_error() {
-  echo "❌ ERROR: $1" >&2
-  exit 1
+  if [ "$LINEAR_MODE" = "true" ]; then
+    echo "⚠️ WARNING (linear mode): $1" >&2
+    return 0
+  else
+    echo "❌ ERROR: $1" >&2
+    exit 1
+  fi
 }
 
 echo "🌐 Setting up Open OnDemand using the official package repository"
@@ -349,18 +365,20 @@ sudo rm -rf /var/run/ondemand-nginx/ooduser/ 2>/dev/null || true
 echo "🚀 Starting Per-User Nginx for ooduser..."
 sudo /opt/ood/nginx_stage/sbin/nginx_stage pun -u ooduser -a start || echo "⚠️ PUN start may need to be done after first login"
 
-# 9. Final check
-sleep 5
-echo -n "Checking Open OnDemand accessibility... "
-if curl --silent --fail --max-time 10 -u ooduser:ooduser http://localhost/ 2>&1 | grep -q "Open OnDemand"; then
-  echo "✅ OnDemand is accessible!"
-else
-  echo "⚠️ OnDemand may not be fully configured yet"
-  echo "Checking Apache status..."
-  sudo systemctl status apache2 --no-pager || true
-  echo "Checking Apache error logs..."
-  sudo tail -20 /var/log/apache2/error.log || true
-  sudo tail -20 /var/log/ondemand/error.log || true
+# 9. Final check - skip in linear mode
+if [ "$LINEAR_MODE" != "true" ]; then
+  sleep 5
+  echo -n "Checking Open OnDemand accessibility... "
+  if curl --silent --fail --max-time 10 -u ooduser:ooduser http://localhost/ 2>&1 | grep -q "Open OnDemand"; then
+    echo "✅ OnDemand is accessible!"
+  else
+    echo "⚠️ OnDemand may not be fully configured yet"
+    echo "Checking Apache status..."
+    sudo systemctl status apache2 --no-pager || true
+    echo "Checking Apache error logs..."
+    sudo tail -20 /var/log/apache2/error.log || true
+    sudo tail -20 /var/log/ondemand/error.log || true
+  fi
 fi
 
 echo

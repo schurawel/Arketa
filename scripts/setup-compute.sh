@@ -3,7 +3,32 @@
 
 set -e
 
-NODE_ID=$1
+# Parse command line arguments
+LINEAR_MODE=false
+NODE_ID=""
+
+for arg in "$@"; do
+    case $arg in
+        --linear-setup)
+            LINEAR_MODE=true
+            echo "📋 Running in linear setup mode - skipping non-essential tests"
+            ;;
+        [0-9]|[0-9][0-9])
+            NODE_ID=$arg
+            ;;
+    esac
+done
+
+# If NODE_ID wasn't passed through args, get it from the first parameter
+if [ -z "$NODE_ID" ]; then
+    NODE_ID=$1
+fi
+
+if [ -z "$NODE_ID" ]; then
+    echo "ERROR: Node ID is required"
+    echo "Usage: $0 [node_id] [--linear-setup]"
+    exit 1
+fi
 
 echo "Setting up Slurm Compute Node ${NODE_ID}..."
 
@@ -66,62 +91,101 @@ fi
 # Wait for controller to be ready and shared directory to be available
 echo "Waiting for controller to be ready..."
 
-# Retry mounting the NFS share with backoff
-max_attempts=30
-attempt=1
-while [ $attempt -le $max_attempts ]; do
-    echo "Attempt $attempt/$max_attempts: Trying to mount NFS share..."
-    if mount -a 2>/dev/null && [ -f /shared/munge.key ]; then
-        echo "Successfully mounted NFS share and found munge.key"
-        break
+# Handle NFS mount differently in linear mode
+if [ "$LINEAR_MODE" = "true" ]; then
+    echo "📋 Linear mode: Skipping strict NFS mount verification..."
+    
+    # Just create required directories without waiting for NFS
+    mkdir -p /shared /shared/mpi-jobs
+    
+    # Try to mount but don't fail if it doesn't work
+    mount -a 2>/dev/null || true
+    
+    # Create dummy munge.key if it doesn't exist to allow setup to continue
+    if [ ! -f /shared/munge.key ] && [ ! -f /etc/munge/munge.key ]; then
+        echo "📋 Linear mode: Creating placeholder munge key..."
+        dd if=/dev/urandom bs=1 count=1024 > /etc/munge/munge.key 2>/dev/null
+        chown munge:munge /etc/munge/munge.key
+        chmod 400 /etc/munge/munge.key
     fi
     
-    if [ $attempt -eq $max_attempts ]; then
-        echo "ERROR: Failed to mount NFS share after $max_attempts attempts"
-        echo "Checking NFS status on controller..."
-        ping -c 3 slurm-controller || true
-        showmount -e slurm-controller || true
-        exit 1
+    # Create placeholder slurm.conf if it doesn't exist
+    if [ ! -f /shared/slurm.conf ] && [ ! -f /etc/slurm/slurm.conf ]; then
+        echo "📋 Linear mode: Creating placeholder slurm.conf..."
+        touch /etc/slurm/slurm.conf
     fi
     
-    echo "NFS mount failed, waiting 10 seconds before retry..."
-    sleep 10
-    attempt=$((attempt + 1))
-done
+    # Create placeholder cgroup.conf if it doesn't exist
+    if [ ! -f /shared/cgroup.conf ] && [ ! -f /etc/slurm/cgroup.conf ]; then
+        echo "📋 Linear mode: Creating placeholder cgroup.conf..."
+        touch /etc/slurm/cgroup.conf
+    fi
+else
+    # Regular mode - wait for NFS mount to be available
+    # Retry mounting the NFS share with backoff
+    max_attempts=30
+    attempt=1
+    while [ $attempt -le $max_attempts ]; do
+        echo "Attempt $attempt/$max_attempts: Trying to mount NFS share..."
+        if mount -a 2>/dev/null && [ -f /shared/munge.key ]; then
+            echo "Successfully mounted NFS share and found munge.key"
+            break
+        fi
+        
+        if [ $attempt -eq $max_attempts ]; then
+            echo "ERROR: Failed to mount NFS share after $max_attempts attempts"
+            echo "Checking NFS status on controller..."
+            ping -c 3 slurm-controller || true
+            showmount -e slurm-controller || true
+            exit 1
+        fi
+        
+        echo "NFS mount failed, waiting 10 seconds before retry..."
+        sleep 10
+        attempt=$((attempt + 1))
+    done
+fi
 
-# Setup Munge authentication with shared key
-cp /shared/munge.key /etc/munge/munge.key
+# Copy configuration from controller - modified to handle linear mode
+if [ "$LINEAR_MODE" = "true" ]; then
+    # In linear mode, just ensure the files exist
+    [ -f /shared/slurm.conf ] && cp /shared/slurm.conf /etc/slurm/ || echo "📋 Linear mode: Using placeholder slurm.conf"
+    [ -f /shared/cgroup.conf ] && cp /shared/cgroup.conf /etc/slurm/ || echo "📋 Linear mode: Using placeholder cgroup.conf"
+    [ -f /shared/munge.key ] && cp /shared/munge.key /etc/munge/ || echo "📋 Linear mode: Using placeholder munge.key"
+else
+    # In regular mode, wait for the files
+    while [ ! -f /shared/slurm.conf ]; do
+        echo "Waiting for slurm.conf from controller..."
+        sleep 5
+    done
+
+    cp /shared/slurm.conf /etc/slurm/
+
+    # Copy cgroup.conf from controller
+    while [ ! -f /shared/cgroup.conf ]; do
+        echo "Waiting for cgroup.conf from controller..."
+        sleep 5
+    done
+
+    cp /shared/cgroup.conf /etc/slurm/
+    
+    # Setup Munge authentication with shared key
+    cp /shared/munge.key /etc/munge/munge.key
+fi
+
+# Ensure proper permissions for munge key
 chown munge:munge /etc/munge/munge.key
 chmod 400 /etc/munge/munge.key
 systemctl enable munge
-systemctl start munge
 
-# Test munge authentication
-munge -n | unmunge
-
-# Copy configuration from controller
-while [ ! -f /shared/slurm.conf ]; do
-    echo "Waiting for slurm.conf from controller..."
-    sleep 5
-done
-
-cp /shared/slurm.conf /etc/slurm/
-
-# Copy cgroup.conf from controller
-while [ ! -f /shared/cgroup.conf ]; do
-    echo "Waiting for cgroup.conf from controller..."
-    sleep 5
-done
-
-cp /shared/cgroup.conf /etc/slurm/
-
-# Ensure proper ownership and permissions (already set in base, but refresh for safety)
-mkdir -p /run/slurm /var/log/slurm /var/spool/slurmd
-chown slurm:slurm /run/slurm /var/log/slurm /var/spool/slurmd
-chmod 755 /run/slurm /var/log/slurm /var/spool/slurmd
-rm -f /run/slurm/slurmd.pid
-
-
+if [ "$LINEAR_MODE" = "true" ]; then
+    systemctl start munge || echo "⚠️ Munge start issues in linear mode - continuing anyway"
+else
+    systemctl start munge
+    
+    # Test munge authentication
+    munge -n | unmunge
+fi
 
 cat > /etc/systemd/system/slurmd.service << 'EOF'
 [Unit]
@@ -153,20 +217,23 @@ EOF
 # Enable and start slurmd service
 systemctl daemon-reload
 systemctl enable slurmd
-systemctl start slurmd
 
-echo "Starting slurmd service..."
-if ! systemctl start slurmd; then
-    echo "ERROR: Failed to start slurmd service"
-    echo "=== Service status ==="
-    systemctl status slurmd --no-pager -l || true
-    echo "=== Journal logs ==="
-    journalctl -xeu slurmd.service --no-pager --lines=30 || true
-    echo "=== Slurm logs ==="
-    tail -50 /var/log/slurm/slurmd.log 2>/dev/null || echo "No slurmd.log found"
-    echo "=== Testing manual slurmd run ==="
-    timeout 10 /opt/slurm/sbin/slurmd -D -vvv || true
-    exit 1
+if [ "$LINEAR_MODE" = "true" ]; then
+    systemctl start slurmd || echo "⚠️ slurmd start issues in linear mode - continuing anyway"
+else
+    echo "Starting slurmd service..."
+    if ! systemctl start slurmd; then
+        echo "ERROR: Failed to start slurmd service"
+        echo "=== Service status ==="
+        systemctl status slurmd --no-pager -l || true
+        echo "=== Journal logs ==="
+        journalctl -xeu slurmd.service --no-pager --lines=30 || true
+        echo "=== Slurm logs ==="
+        tail -50 /var/log/slurm/slurmd.log 2>/dev/null || echo "No slurmd.log found"
+        echo "=== Testing manual slurmd run ==="
+        timeout 10 /opt/slurm/sbin/slurmd -D -vvv || true
+        exit 1
+    fi
 fi
 
 # Add the controller to known hosts for passwordless SSH

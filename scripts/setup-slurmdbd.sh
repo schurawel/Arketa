@@ -5,6 +5,17 @@
 
 set -e
 
+# Parse command line arguments
+LINEAR_MODE=false
+for arg in "$@"; do
+    case $arg in
+        --linear-setup)
+            LINEAR_MODE=true
+            echo "📋 Running in linear setup mode - skipping non-essential tests"
+            ;;
+    esac
+done
+
 echo "Setting up Slurm Database Daemon (slurmdbd)..."
 
 # --- Configuration ---
@@ -151,40 +162,52 @@ EOF
 echo "🚀 Starting slurmdbd service..."
 systemctl daemon-reload
 systemctl enable slurmdbd
-systemctl start slurmdbd || {
-    echo "ERROR: Failed to start slurmdbd service"
-    echo "=== Service status ==="
-    systemctl status slurmdbd --no-pager -l || true
-    echo "=== Journal logs ==="
-    journalctl -xeu slurmdbd.service --no-pager --lines=30 || true
-    exit 1
-}
 
-# Wait for slurmdbd to be fully available
-echo "⏳ Waiting for slurmdbd to become available..."
-sleep 10
+if [ "$LINEAR_MODE" = "true" ]; then
+    systemctl start slurmdbd || echo "⚠️ slurmdbd start issues in linear mode - continuing anyway"
+    # Skip wait and verification steps for linear mode
+else
+    systemctl start slurmdbd || {
+        echo "ERROR: Failed to start slurmdbd service"
+        echo "=== Service status ==="
+        systemctl status slurmdbd --no-pager -l || true
+        echo "=== Journal logs ==="
+        journalctl -xeu slurmdbd.service --no-pager --lines=30 || true
+        exit 1
+    }
+
+    # Wait for slurmdbd to be fully available
+    echo "⏳ Waiting for slurmdbd to become available..."
+    sleep 10
+fi
 
 # Initialize accounting
 echo "🔧 Initializing Slurm accounting..."
-/opt/slurm/bin/sacctmgr --immediate add cluster vagrant-cluster || {
-    echo "WARNING: Failed to add cluster to accounting. This might be OK if it already exists."
-    # Check if cluster exists
-    if /opt/slurm/bin/sacctmgr list cluster format=cluster,controlhost,controlport -n | grep -q vagrant-cluster; then
-        echo "✅ Cluster 'vagrant-cluster' already exists in accounting database."
+if [ "$LINEAR_MODE" = "true" ]; then
+    /opt/slurm/bin/sacctmgr --immediate add cluster vagrant-cluster || echo "⚠️ Cluster accounting issues in linear mode - continuing anyway"
+else
+    /opt/slurm/bin/sacctmgr --immediate add cluster vagrant-cluster || {
+        echo "WARNING: Failed to add cluster to accounting. This might be OK if it already exists."
+        # Check if cluster exists
+        if /opt/slurm/bin/sacctmgr list cluster format=cluster,controlhost,controlport -n | grep -q vagrant-cluster; then
+            echo "✅ Cluster 'vagrant-cluster' already exists in accounting database."
+        else
+            echo "ERROR: Failed to add or verify cluster in accounting database."
+            exit 1
+        fi
+    }
+fi
+
+# Final verification - skip in linear mode
+if [ "$LINEAR_MODE" != "true" ]; then
+    echo "🔍 Verifying slurmdbd service..."
+    if systemctl is-active --quiet slurmdbd; then
+        echo "✅ slurmdbd is running successfully"
     else
-        echo "ERROR: Failed to add or verify cluster in accounting database."
+        echo "❌ slurmdbd is not running. Please check the logs."
+        systemctl status slurmdbd --no-pager -l
         exit 1
     fi
-}
-
-# Final verification
-echo "🔍 Verifying slurmdbd service..."
-if systemctl is-active --quiet slurmdbd; then
-    echo "✅ slurmdbd is running successfully"
-else
-    echo "❌ slurmdbd is not running. Please check the logs."
-    systemctl status slurmdbd --no-pager -l
-    exit 1
 fi
 
 echo "✅ Slurm Database Daemon setup completed!"

@@ -8,6 +8,9 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Setup mode - will be set by prompt_setup_mode function
+SETUP_MODE="standard"
+
 # Configuration
 VM_DIR="/home/thinclient/Documents/PrimedSLURM/qemu-vms"
 BASE_IMAGE="${VM_DIR}/saved-ubuntu-vm.qcow2"
@@ -404,36 +407,132 @@ EOF
     
     echo -e "${BLUE}Waiting for VMs to boot...${NC}"
     sleep 20
+    
+    # Always ask the user if they want to update configurations
+    echo -e "${YELLOW}Would you like to update Slurm configurations on compute nodes from controller?${NC}"
+    echo -e "${BLUE}This is recommended if:${NC}"
+    echo -e "  - This is a first start after linear mode setup"
+    echo -e "  - You've made changes to Slurm configuration"
+    echo -e "  - Compute nodes aren't connecting to the controller properly"
+    read -p "Update configurations? (y/n): " update_configs
+    
+    case "$update_configs" in
+        [Yy]|[Yy][Ee][Ss])
+            echo -e "${BLUE}Updating compute node configurations...${NC}"
+            update_compute_config
+            ;;
+        *)
+            echo -e "${YELLOW}Skipping configuration update.${NC}"
+            ;;
+    esac
 }
 
-# Function to configure network on VMs
-configure_vm_network() {
-    local hostname=$1
-    local ip=$2
-    local mac=$3
+# Function to update slurm configuration on compute nodes from controller
+update_compute_config() {
+    echo -e "${BLUE}=== Updating Slurm configuration on compute nodes ===${NC}"
     
-    echo -e "${BLUE}Configuring network for ${hostname}...${NC}"
+    # Wait for controller to be accessible
+    echo -e "${BLUE}Waiting for controller to be accessible...${NC}"
+    local max_attempts=30
+    local attempt=1
+    while [ $attempt -le $max_attempts ]; do
+        echo -e "${YELLOW}Attempt ${attempt}/${max_attempts}: Checking if controller is ready...${NC}"
+        if ping -c 1 -W 2 ${CONTROLLER_IP} > /dev/null 2>&1; then
+            echo -e "${GREEN}Controller is pingable!${NC}"
+            
+            # Check if SSH is available
+            if nc -z -w 5 ${CONTROLLER_IP} 22; then
+                echo -e "${GREEN}Controller SSH is available!${NC}"
+                sleep 10  # Give a bit more time for services to fully start
+                break
+            fi
+        fi
+        
+        if [ $attempt -eq $max_attempts ]; then
+            echo -e "${RED}Controller not accessible after ${max_attempts} attempts. Cannot update compute node configs.${NC}"
+            return 1
+        fi
+        
+        sleep 10
+        attempt=$((attempt + 1))
+    done
     
-    # Restart VM with new cloud-init ISO
-    echo -e "${BLUE}Restarting ${hostname} VM with new network configuration...${NC}"
-    local vm_pid=$(pgrep -f "qemu.*${hostname}")
-    if [ -n "$vm_pid" ]; then
-        sudo kill -9 "$vm_pid" || true
-        sleep 5
+    # Check if slurm.conf exists on controller
+    echo -e "${BLUE}Checking if Slurm configuration files exist on controller...${NC}"
+    if ! sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${CONTROLLER_IP}" "test -f /etc/slurm/slurm.conf"; then
+        echo -e "${RED}slurm.conf not found on controller. Cannot update compute nodes.${NC}"
+        return 1
     fi
     
-    # Start VM with new cloud-init ISO
-    qemu-system-x86_64 -m 4096 -smp 4 \
-        -enable-kvm \
-        -cpu host \
-        -drive file="${VM_DIR}/${hostname}.qcow2",format=qcow2 \
-        -netdev tap,id=net0,ifname="tap${hostname: -1}",script=no,downscript=no \
-        -device virtio-net-pci,netdev=net0,mac="$mac" \
-        -nographic \
-        -serial mon:stdio \
-        -name "$hostname" &
+    # For each compute node
+    for i in 1 2; do
+        local node_ip="192.168.7.1${i}"
+        echo -e "${BLUE}Updating Slurm configuration on node${i}...${NC}"
+        
+        # Wait for node to be accessible
+        echo -e "${BLUE}Waiting for node${i} to be accessible...${NC}"
+        local node_attempt=1
+        while [ $node_attempt -le $max_attempts ]; do
+            echo -e "${YELLOW}Attempt ${node_attempt}/${max_attempts}: Checking if node${i} is ready...${NC}"
+            if ping -c 1 -W 2 ${node_ip} > /dev/null 2>&1; then
+                echo -e "${GREEN}Node${i} is pingable!${NC}"
+                
+                # Check if SSH is available
+                if nc -z -w 5 ${node_ip} 22; then
+                    echo -e "${GREEN}Node${i} SSH is available!${NC}"
+                    sleep 5
+                    break
+                fi
+            fi
+            
+            if [ $node_attempt -eq $max_attempts ]; then
+                echo -e "${RED}Node${i} not accessible after ${max_attempts} attempts. Skipping.${NC}"
+                continue 2
+            fi
+            
+            sleep 10
+            node_attempt=$((node_attempt + 1))
+        done
+        
+        # Copy slurm.conf and cgroup.conf from controller to compute node
+        echo -e "${BLUE}Copying Slurm configuration from controller to node${i}...${NC}"
+        
+        # First copy files from controller to local temp dir
+        local tmp_dir="/tmp/slurm-config-update"
+        mkdir -p "$tmp_dir"
+        sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no "${VM_USERNAME}@${CONTROLLER_IP}:/etc/slurm/slurm.conf" "$tmp_dir/"
+        sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no "${VM_USERNAME}@${CONTROLLER_IP}:/etc/slurm/cgroup.conf" "$tmp_dir/"
+        
+        # Then copy files from local temp dir to compute node
+        sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no "$tmp_dir/slurm.conf" "${VM_USERNAME}@${node_ip}:/tmp/"
+        sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no "$tmp_dir/cgroup.conf" "${VM_USERNAME}@${node_ip}:/tmp/"
+        
+        # Move files to correct location and restart slurmd on compute node
+        sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${node_ip}" << EOF
+sudo mv /tmp/slurm.conf /etc/slurm/
+sudo mv /tmp/cgroup.conf /etc/slurm/
+sudo chown root:root /etc/slurm/slurm.conf /etc/slurm/cgroup.conf
+sudo chmod 644 /etc/slurm/slurm.conf /etc/slurm/cgroup.conf
+
+# Copy munge key from controller if it's available via NFS
+if [ -f /shared/munge.key ]; then
+    sudo cp /shared/munge.key /etc/munge/
+    sudo chown munge:munge /etc/munge/munge.key
+    sudo chmod 400 /etc/munge/munge.key
+    sudo systemctl restart munge
+fi
+
+# Restart slurmd to pick up new configuration
+sudo systemctl restart slurmd
+
+echo "Slurm configuration updated on node${i}"
+EOF
+        
+        echo -e "${GREEN}Node${i} configuration updated successfully!${NC}"
+    done
     
-    echo -e "${GREEN}Network configuration for ${hostname} completed.${NC}"
+    echo -e "${GREEN}Slurm configuration update completed!${NC}"
+    return 0
 }
 
 # Function to provision cluster nodes
@@ -527,6 +626,7 @@ cleanup_cluster() {
 
 # Function to start controller VM and provision it
 start_controller_vm() {
+    local linear_mode=$1
     echo -e "${BLUE}=== Starting and Provisioning Controller VM ===${NC}"
     
     # Check if controller image exists
@@ -726,9 +826,10 @@ EOF
     sudo ip link set dev tap0 up
     sudo ovs-vsctl --may-exist add-port $BRIDGE_NAME tap0
     
-    # Start controller VM with TAP networking (using sudo with the script instead)
+    # Start controller VM with TAP networking
     echo -e "${BLUE}Starting controller VM with virtual switch networking...${NC}"
     xterm -title "Slurm Controller" -e "${CONTROLLER_TAP_SCRIPT}" &
+    CONTROLLER_TAP_PID=$!
     
     # Wait for VM to boot with the new network - increased waiting time
     echo -e "${BLUE}Waiting for controller VM to boot with virtual switch networking...${NC}"
@@ -737,43 +838,56 @@ EOF
     # PHASE 5: Verify connectivity using direct IP - SAME AS auto_vm_connect_bridge.sh approach
     echo -e "${BLUE}PHASE 5: Verifying connectivity to controller VM${NC}"
     
-    # Wait for ping to succeed
-    echo -e "${BLUE}Checking ping connectivity to ${CONTROLLER_IP}...${NC}"
-    for i in {1..30}; do
-        echo -e "${YELLOW}Ping attempt ${i}/30...${NC}"
-        if ping -c 1 -W 2 "${CONTROLLER_IP}" > /dev/null 2>&1; then
-            echo -e "${GREEN}Successfully pinged controller VM at ${CONTROLLER_IP}${NC}"
-            break
-        fi
+    # Skip connectivity tests in linear mode
+    if [ "$linear_mode" != "true" ]; then
+        # Wait for ping to succeed
+        echo -e "${BLUE}Checking ping connectivity to ${CONTROLLER_IP}...${NC}"
+        for i in {1..30}; do
+            echo -e "${YELLOW}Ping attempt ${i}/30...${NC}"
+            if ping -c 1 -W 2 "${CONTROLLER_IP}" > /dev/null 2>&1; then
+                echo -e "${GREEN}Successfully pinged controller VM at ${CONTROLLER_IP}${NC}"
+                break
+            fi
+            
+            if [ $i -eq 30 ]; then
+                echo -e "${RED}Failed to ping controller VM after 30 attempts.${NC}"
+                echo -e "${YELLOW}Network debug information:${NC}"
+                sudo ovs-vsctl show
+                sudo ip link show tap0
+                return 1
+            fi
+            
+            sleep 5
+        done
         
-        if [ $i -eq 30 ]; then
-            echo -e "${RED}Failed to ping controller VM after 30 attempts.${NC}"
-            echo -e "${YELLOW}Network debug information:${NC}"
-            sudo ovs-vsctl show
-            sudo ip link show tap0
-            return 1
-        fi
+        # Wait for SSH to be available on direct IP
+        echo -e "${BLUE}Checking SSH connectivity to ${CONTROLLER_IP}...${NC}"
+        for i in {1..30}; do
+            echo -e "${YELLOW}SSH check attempt ${i}/30...${NC}"
+            if nc -z -w 2 "${CONTROLLER_IP}" 22; then
+                echo -e "${GREEN}SSH port is open on controller VM${NC}"
+                sleep 10  # Give SSH service a bit more time to fully initialize
+                break
+            fi
+            
+            if [ $i -eq 30 ]; then
+                echo -e "${RED}SSH port not open on controller VM after 30 attempts.${NC}"
+                return 1
+            fi
+            
+            sleep 5
+        done
+    else
+        # Just wait a bit in linear mode for VM to boot properly
+        echo -e "${YELLOW}Linear mode: Waiting for controller VM to boot...${NC}"
+        sleep 30
         
-        sleep 5
-    done
-    
-    # Wait for SSH to be available on direct IP
-    echo -e "${BLUE}Checking SSH connectivity to ${CONTROLLER_IP}...${NC}"
-    for i in {1..30}; do
-        echo -e "${YELLOW}SSH check attempt ${i}/30...${NC}"
-        if nc -z -w 2 "${CONTROLLER_IP}" 22; then
-            echo -e "${GREEN}SSH port is open on controller VM${NC}"
-            sleep 10  # Give SSH service a bit more time to fully initialize
-            break
+        # Simple check to see if controller is reachable
+        if ! ping -c 1 -W 5 "${CONTROLLER_IP}" > /dev/null 2>&1; then
+            echo -e "${RED}Warning: Cannot ping controller VM. Network may not be properly configured.${NC}"
+            # But continue anyway
         fi
-        
-        if [ $i -eq 30 ]; then
-            echo -e "${RED}SSH port not open on controller VM after 30 attempts.${NC}"
-            return 1
-        fi
-        
-        sleep 5
-    done
+    fi
     
     # PHASE 6: Provision controller
     echo -e "${BLUE}PHASE 6: Provisioning controller VM${NC}"
@@ -833,16 +947,54 @@ EOF
     # Check if controller setup succeeded
     if [ $? -ne 0 ]; then
         echo -e "${RED}ERROR: Failed to setup controller VM${NC}"
-        return 1
+        retval=1
     else
         echo -e "${GREEN}Controller VM setup completed successfully!${NC}"
-        return 0
+        retval=0
     fi
+    
+    # If in linear mode, shut down the VM after configuration
+    if [ "$linear_mode" = "true" ]; then
+        echo -e "${YELLOW}Linear mode: Shutting down controller VM after configuration...${NC}"
+        
+        # Graceful shutdown via SSH
+        sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${CONTROLLER_IP}" "sudo poweroff" || {
+            echo -e "${RED}Failed to gracefully shut down controller VM. Forcing termination...${NC}"
+        }
+        
+        # Wait for VM to shut down (monitor the QEMU process)
+        echo -e "${BLUE}Waiting for controller VM to shut down...${NC}"
+        for i in {1..30}; do
+            if ! pgrep -f "qemu.*slurm-controller" > /dev/null; then
+                echo -e "${GREEN}Controller VM has shut down.${NC}"
+                break
+            fi
+            echo -e "${YELLOW}Waiting for controller VM to shut down (attempt $i/30)...${NC}"
+            sleep 2
+            
+            # If we've waited too long, force kill the process
+            if [ $i -eq 30 ]; then
+                echo -e "${RED}Controller VM didn't shut down gracefully. Killing process...${NC}"
+                pkill -f "qemu.*slurm-controller"
+                sleep 3
+                pkill -9 -f "qemu.*slurm-controller" 2>/dev/null || true
+            fi
+        done
+        
+        # Ensure xterm is closed as well
+        pkill -f "xterm.*[Cc]ontroller" 2>/dev/null || true
+        
+        echo -e "${GREEN}Controller VM has been configured and shut down.${NC}"
+        sleep 5
+    fi
+    
+    return $retval
 }
 
 # Update start_compute_node to use the same multi-phase approach
 start_compute_node() {
     local node_num=$1
+    local linear_mode=$2
     local node_ip="192.168.7.1${node_num}"
     local node_mac="52:54:00:12:34:1${node_num}"
     local node_image="${VM_DIR}/slurm-node${node_num}.qcow2"
@@ -883,6 +1035,7 @@ EOF
     # Start node VM with user networking
     echo -e "${BLUE}Starting ${node_name} with user networking...${NC}"
     xterm -title "${node_name}" -e "${node_user_script}" &
+    NODE_USER_PID=$!
     
     # Wait for VM to boot
     echo -e "${BLUE}Waiting for ${node_name} to boot...${NC}"
@@ -1040,6 +1193,7 @@ EOF
     # Start node VM with TAP networking
     echo -e "${BLUE}Starting ${node_name} with virtual switch networking...${NC}"
     xterm -title "Slurm ${node_name}" -e "${node_tap_script}" &
+    NODE_TAP_PID=$!
     
     # Wait for VM to boot with the new network
     echo -e "${BLUE}Waiting for ${node_name} to boot with virtual switch networking...${NC}"
@@ -1048,40 +1202,53 @@ EOF
     # PHASE 4: Verify connectivity using direct IP
     echo -e "${BLUE}PHASE 4: Verifying connectivity to ${node_name}${NC}"
     
-    # Wait for ping to succeed
-    echo -e "${BLUE}Checking ping connectivity to ${node_ip}...${NC}"
-    for i in {1..20}; do
-        echo -e "${YELLOW}Ping attempt ${i}/20...${NC}"
-        if ping -c 1 -W 2 "${node_ip}" > /dev/null 2>&1; then
-            echo -e "${GREEN}Successfully pinged ${node_name} at ${node_ip}${NC}"
-            break
-        fi
+    # Skip connectivity tests in linear mode
+    if [ "$linear_mode" != "true" ]; then
+        # Wait for ping to succeed
+        echo -e "${BLUE}Checking ping connectivity to ${node_ip}...${NC}"
+        for i in {1..20}; do
+            echo -e "${YELLOW}Ping attempt ${i}/20...${NC}"
+            if ping -c 1 -W 2 "${node_ip}" > /dev/null 2>&1; then
+                echo -e "${GREEN}Successfully pinged ${node_name} at ${node_ip}${NC}"
+                break
+            fi
+            
+            if [ $i -eq 20 ]; then
+                echo -e "${RED}Failed to ping ${node_name} after 20 attempts.${NC}"
+                return 1
+            fi
+            
+            sleep 5
+        done
         
-        if [ $i -eq 20 ]; then
-            echo -e "${RED}Failed to ping ${node_name} after 20 attempts.${NC}"
-            return 1
-        fi
+        # Wait for SSH to be available on direct IP
+        echo -e "${BLUE}Checking SSH connectivity to ${node_ip}...${NC}"
+        for i in {1..20}; do
+            echo -e "${YELLOW}SSH check attempt ${i}/20...${NC}"
+            if nc -z -w 2 "${node_ip}" 22; then
+                echo -e "${GREEN}SSH port is open on ${node_name}${NC}"
+                sleep 10  # Give SSH service a bit more time to fully initialize
+                break
+            fi
+            
+            if [ $i -eq 20 ]; then
+                echo -e "${RED}SSH port not open on ${node_name} after 20 attempts.${NC}"
+                return 1
+            fi
+            
+            sleep 5
+        done
+    else
+        # Just wait a bit in linear mode for VM to boot properly
+        echo -e "${YELLOW}Linear mode: Waiting for ${node_name} to boot...${NC}"
+        sleep 30
         
-        sleep 5
-    done
-    
-    # Wait for SSH to be available on direct IP
-    echo -e "${BLUE}Checking SSH connectivity to ${node_ip}...${NC}"
-    for i in {1..20}; do
-        echo -e "${YELLOW}SSH check attempt ${i}/20...${NC}"
-        if nc -z -w 2 "${node_ip}" 22; then
-            echo -e "${GREEN}SSH port is open on ${node_name}${NC}"
-            sleep 10  # Give SSH service a bit more time to fully initialize
-            break
+        # Simple check to see if node is reachable
+        if ! ping -c 1 -W 5 "${node_ip}" > /dev/null 2>&1; then
+            echo -e "${RED}Warning: Cannot ping ${node_name}. Network may not be properly configured.${NC}"
+            # But continue anyway
         fi
-        
-        if [ $i -eq 20 ]; then
-            echo -e "${RED}SSH port not open on ${node_name} after 20 attempts.${NC}"
-            return 1
-        fi
-        
-        sleep 5
-    done
+    fi
     
     # PHASE 5: Provision compute node
     echo -e "${BLUE}PHASE 5: Provisioning ${node_name}${NC}"
@@ -1090,20 +1257,67 @@ EOF
     echo -e "${BLUE}Copying scripts to ${node_name}...${NC}"
     sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -r "$SCRIPTS_DIR" "${VM_USERNAME}@${node_ip}:~/"
     
-    # Run compute node setup script
+    # Run compute node setup script - Pass linear mode flag when in linear mode
     echo -e "${BLUE}Running setup-compute.sh inside VM...${NC}"
-    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${node_ip}" <<EOF
+    if [ "$linear_mode" = "true" ]; then
+        # Pass the linear setup flag when in linear mode
+        sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${node_ip}" <<EOF
+sudo chmod +x ~/scripts/*.sh
+sudo ~/scripts/setup-compute.sh ${node_num} --linear-setup
+EOF
+    else
+        # Standard mode without the flag
+        sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${node_ip}" <<EOF
 sudo chmod +x ~/scripts/*.sh
 sudo ~/scripts/setup-compute.sh ${node_num}
 EOF
-    
+    fi
+
+    # Check setup status and prepare return value
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}${node_name} setup completed successfully!${NC}"
-        return 0
+        retval=0
     else
         echo -e "${RED}Failed to setup ${node_name}.${NC}"
-        return 1
+        retval=1
     fi
+    
+    # If in linear mode, shut down the VM after configuration
+    if [ "$linear_mode" = "true" ]; then
+        echo -e "${YELLOW}Linear mode: Shutting down ${node_name} after configuration...${NC}"
+        
+        # Graceful shutdown via SSH
+        sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${node_ip}" "sudo poweroff" || {
+            echo -e "${RED}Failed to gracefully shut down ${node_name}. Forcing termination...${NC}"
+        }
+        
+        # Wait for VM to shut down (monitor the QEMU process)
+        echo -e "${BLUE}Waiting for ${node_name} to shut down...${NC}"
+        for i in {1..30}; do
+            if ! pgrep -f "qemu.*slurm-${node_name}" > /dev/null; then
+                echo -e "${GREEN}${node_name} has shut down.${NC}"
+                break
+            fi
+            echo -e "${YELLOW}Waiting for ${node_name} to shut down (attempt $i/30)...${NC}"
+            sleep 2
+            
+            # If we've waited too long, force kill the process
+            if [ $i -eq 30 ]; then
+                echo -e "${RED}${node_name} didn't shut down gracefully. Killing process...${NC}"
+                pkill -f "qemu.*slurm-${node_name}"
+                sleep 3
+                pkill -9 -f "qemu.*slurm-${node_name}" 2>/dev/null || true
+            fi
+        done
+        
+        # Ensure xterm is closed as well
+        pkill -f "xterm.*${node_name}" 2>/dev/null || true
+        
+        echo -e "${GREEN}${node_name} has been configured and shut down.${NC}"
+        sleep 5
+    fi
+    
+    return $retval
 }
 
 # Function to setup virtual switch using Open vSwitch
@@ -1197,6 +1411,35 @@ setup_virtual_switch() {
     echo -e "${GREEN}Virtual switch setup completed.${NC}"
 }
 
+# Function to prompt user for setup mode
+prompt_setup_mode() {
+    echo -e "${BLUE}===== QEMU Slurm Cluster Setup Mode =====${NC}"
+    echo -e "${YELLOW}Please select your preferred setup mode:${NC}"
+    echo -e "1) ${GREEN}Standard Setup${NC} - All VMs run simultaneously (higher resource usage)"
+    echo -e "2) ${GREEN}Linear Setup${NC} - VMs are started one by one, shutdown after configuration (lower resource usage)"
+    echo ""
+    read -p "Enter your choice (1 or 2): " choice
+    
+    case "$choice" in
+        1)
+            SETUP_MODE="standard"
+            echo -e "${BLUE}Standard setup mode selected.${NC}"
+            ;;
+        2)
+            SETUP_MODE="linear"
+            echo -e "${BLUE}Linear setup mode selected. VMs will be started and configured one at a time.${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}Invalid choice. Defaulting to standard setup mode.${NC}"
+            SETUP_MODE="standard"
+            ;;
+    esac
+    
+    echo ""
+    # Give user time to read the selection
+    sleep 2
+}
+
 # Main script logic
 case "${1:-build}" in
     build-base)
@@ -1212,6 +1455,9 @@ case "${1:-build}" in
         create_compute_nodes
         ;;
     build)
+        # Ask user for setup mode
+        prompt_setup_mode
+        
         echo -e "${GREEN}Building Complete QEMU Slurm Cluster${NC}"
         
         # Step 1: Build base image if it doesn't exist
@@ -1233,24 +1479,36 @@ case "${1:-build}" in
         create_compute_nodes
         echo -e "${GREEN}✅ Created controller and compute node images from base image${NC}"
         
+        # Linear mode flag
+        linear_mode="false"
+        if [ "$SETUP_MODE" = "linear" ]; then
+            linear_mode="true"
+        fi
+        
         # Step 3: Start controller and run setup-controller.sh inside VM
         echo -e "${BLUE}Starting and provisioning controller VM...${NC}"
-        start_controller_vm || {
+        start_controller_vm "$linear_mode" || {
             echo -e "${RED}Failed to setup controller VM. Cannot continue.${NC}"
             exit 1
         }
         
         # Step 4: Start node1 and run setup-compute.sh with node ID 1
         echo -e "${BLUE}Starting and provisioning node1 VM...${NC}"
-        start_compute_node 1 || {
+        start_compute_node 1 "$linear_mode" || {
             echo -e "${YELLOW}Warning: Issue with node1 setup, but continuing...${NC}"
         }
         
         # Step 5: Start node2 and run setup-compute.sh with node ID 2
         echo -e "${BLUE}Starting and provisioning node2 VM...${NC}"
-        start_compute_node 2 || {
+        start_compute_node 2 "$linear_mode" || {
             echo -e "${YELLOW}Warning: Issue with node2 setup, but continuing...${NC}"
         }
+        
+        # If linear mode, now start all VMs for actual use
+        if [ "$SETUP_MODE" = "linear" ]; then
+            echo -e "${BLUE}Linear setup completed. Starting all VMs for use...${NC}"
+            start_cluster_vms
+        fi
         
         echo -e "${GREEN}Cluster setup complete!${NC}"
         echo -e "${BLUE}Controller: ssh ${VM_USERNAME}@${CONTROLLER_IP}${NC}"
@@ -1259,6 +1517,7 @@ case "${1:-build}" in
         ;;
     start)
         echo -e "${GREEN}Starting cluster VMs...${NC}"
+        # No need to check for linear mode anymore since we always ask
         start_cluster_vms
         ;;
     stop)

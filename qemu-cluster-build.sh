@@ -974,10 +974,49 @@ EOF
     
     # Copy scripts and sample jobs to controller
     echo -e "${BLUE}Copying scripts and sample jobs to controller...${NC}"
+    
+    # Ensure scripts directory is owned by ubuntu and writable on the controller
+    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${CONTROLLER_IP}" "sudo rm -rf ~/scripts && mkdir -p ~/scripts/configs && chown -R ${VM_USERNAME}:${VM_USERNAME} ~/scripts"
+
+    # First, temporarily make munge.key more permissive for copying
+    MUNGE_KEY_PATH="${SCRIPTS_DIR}/configs/munge.key"
+    MUNGE_KEY_PERMS_CHANGED=false
+    if [ -f "$MUNGE_KEY_PATH" ]; then
+        original_perms=$(stat -c "%a" "$MUNGE_KEY_PATH")
+        if [ "$original_perms" = "400" ]; then
+            chmod 644 "$MUNGE_KEY_PATH"
+            MUNGE_KEY_PERMS_CHANGED=true
+            echo -e "${BLUE}Temporarily relaxed munge.key permissions for copying${NC}"
+        fi
+    fi
+    
+    # Copy scripts directory
     sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -r "$SCRIPTS_DIR" "${VM_USERNAME}@${CONTROLLER_IP}:~/" || {
+        # Restore original permissions if we changed them
+        if [ "$MUNGE_KEY_PERMS_CHANGED" = "true" ]; then
+            chmod 400 "$MUNGE_KEY_PATH"
+        fi
         echo -e "${RED}ERROR: Failed to copy scripts to controller VM${NC}"
         exit 1
     }
+    
+    # Restore original munge.key permissions on host
+    if [ "$MUNGE_KEY_PERMS_CHANGED" = "true" ]; then
+        chmod 400 "$MUNGE_KEY_PATH"
+        echo -e "${BLUE}Restored original munge.key permissions on host${NC}"
+    fi
+    
+    # Restore restrictive permissions on munge.key in the VM
+    if [ -f "$MUNGE_KEY_PATH" ]; then
+        sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${CONTROLLER_IP}" << 'EOF'
+if [ -f ~/scripts/configs/munge.key ]; then
+    chmod 400 ~/scripts/configs/munge.key
+    echo "Restored restrictive permissions on munge.key in VM"
+fi
+EOF
+    fi
+    
+    # Copy sample jobs
     sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -r "$SAMPLE_JOBS_DIR" "${VM_USERNAME}@${CONTROLLER_IP}:~/" || {
         echo -e "${RED}ERROR: Failed to copy sample jobs to controller VM${NC}"
         exit 1
@@ -1335,7 +1374,47 @@ EOF
     
     # Copy scripts to compute node
     echo -e "${BLUE}Copying scripts to ${node_name}...${NC}"
-    sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -r "$SCRIPTS_DIR" "${VM_USERNAME}@${node_ip}:~/"
+    
+    # Ensure scripts directory is owned by ubuntu and writable on the compute node
+    sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${node_ip}" "sudo rm -rf ~/scripts && mkdir -p ~/scripts/configs && chown -R ${VM_USERNAME}:${VM_USERNAME} ~/scripts"
+
+    # Temporarily make munge.key more permissive for copying
+    MUNGE_KEY_PATH="${SCRIPTS_DIR}/configs/munge.key"
+    MUNGE_KEY_PERMS_CHANGED=false
+    if [ -f "$MUNGE_KEY_PATH" ]; then
+        original_perms=$(stat -c "%a" "$MUNGE_KEY_PATH")
+        if [ "$original_perms" = "400" ]; then
+            chmod 644 "$MUNGE_KEY_PATH"
+            MUNGE_KEY_PERMS_CHANGED=true
+            echo -e "${BLUE}Temporarily relaxed munge.key permissions for copying to ${node_name}${NC}"
+        fi
+    fi
+    
+    # Copy scripts directory
+    sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -r "$SCRIPTS_DIR" "${VM_USERNAME}@${node_ip}:~/" || {
+        # Restore original permissions if we changed them
+        if [ "$MUNGE_KEY_PERMS_CHANGED" = "true" ]; then
+            chmod 400 "$MUNGE_KEY_PATH"
+        fi
+        echo -e "${RED}ERROR: Failed to copy scripts to ${node_name}${NC}"
+        return 1
+    }
+    
+    # Restore original munge.key permissions on host
+    if [ "$MUNGE_KEY_PERMS_CHANGED" = "true" ]; then
+        chmod 400 "$MUNGE_KEY_PATH"
+        echo -e "${BLUE}Restored original munge.key permissions on host${NC}"
+    fi
+    
+    # Restore restrictive permissions on munge.key in the VM
+    if [ -f "$MUNGE_KEY_PATH" ]; then
+        sshpass -p "$VM_PASSWORD" ssh -o StrictHostKeyChecking=no "${VM_USERNAME}@${node_ip}" << 'EOF'
+if [ -f ~/scripts/configs/munge.key ]; then
+    chmod 400 ~/scripts/configs/munge.key
+    echo "Restored restrictive permissions on munge.key in VM"
+fi
+EOF
+    fi
     
     # Run compute node setup script - Pass linear mode flag when in linear mode
     echo -e "${BLUE}Running setup-compute.sh inside VM...${NC}"

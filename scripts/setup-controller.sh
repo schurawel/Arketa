@@ -538,6 +538,108 @@ else
     echo "🤷 Skipping slurm-web setup: scripts directory not found."
 fi
 
+# Create desktop session scripts directory if it doesn't exist
+mkdir -p /usr/share/ondemand-desktops
+
+# Create XFCE desktop script for controller
+cat > /usr/share/ondemand-desktops/xfce.sh << 'EOFXFCE'
+#!/bin/bash
+
+export XAUTHORITY="${HOME}/.Xauthority"
+export DISPLAY="${DISPLAY:-:1}"
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+  eval $(dbus-launch --sh-syntax)
+fi
+
+# Remove any preconfigured monitors
+if [[ -f "${HOME}/.config/monitors.xml" ]]; then
+  mv "${HOME}/.config/monitors.xml" "${HOME}/.config/monitors.xml.bak"
+fi
+
+# Copy over default panel if doesn't exist, otherwise it will prompt the user
+PANEL_CONFIG="${HOME}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
+if [[ ! -e "${PANEL_CONFIG}" ]]; then
+  mkdir -p "$(dirname "${PANEL_CONFIG}")"
+  cp "/etc/xdg/xfce4/panel/default.xml" "${PANEL_CONFIG}" 2>/dev/null || true
+fi
+
+# Disable startup services
+xfconf-query -c xfce4-session -p /startup/ssh-agent/enabled -n -t bool -s false 2>/dev/null || true
+xfconf-query -c xfce4-session -p /startup/gpg-agent/enabled -n -t bool -s false 2>/dev/null || true
+
+# Disable useless services on autostart
+AUTOSTART="${HOME}/.config/autostart"
+rm -fr "${AUTOSTART}"
+mkdir -p "${AUTOSTART}"
+for service in "pulseaudio" "rhsm-icon" "spice-vdagent" "tracker-extract" "tracker-miner-apps" "tracker-miner-user-guides" "xfce4-power-manager" "xfce-polkit"; do
+  echo -e "[Desktop Entry]\nHidden=true" > "${AUTOSTART}/${service}.desktop"
+done
+
+# Run Xfce4 Terminal as login shell (sets proper TERM)
+TERM_CONFIG="${HOME}/.config/xfce4/terminal/terminalrc"
+if [[ ! -e "${TERM_CONFIG}" ]]; then
+  mkdir -p "$(dirname "${TERM_CONFIG}")"
+  sed 's/^ \{4\}//' > "${TERM_CONFIG}" << EOL
+    [Configuration]
+    CommandLoginShell=TRUE
+EOL
+else
+  sed -i \
+    '/^CommandLoginShell=/{h;s/=.*/=TRUE/};${x;/^$/{s//CommandLoginShell=TRUE/;H};x}' \
+    "${TERM_CONFIG}"
+fi
+
+# Launch dbus first through eval because it can conflict with a conda environment
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+  eval $(dbus-launch --sh-syntax)
+fi
+
+# Start up xfce desktop (block until user logs out of desktop)
+exec xfce4-session
+EOFXFCE
+
+# Create KDE desktop script for controller
+cat > /usr/share/ondemand-desktops/kde.sh << 'EOFKDE'
+#!/bin/bash
+
+export XAUTHORITY="${HOME}/.Xauthority"
+export DISPLAY="${DISPLAY:-:1}"
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+  eval $(dbus-launch --sh-syntax)
+fi
+
+# Disable useless services on autostart
+AUTOSTART="${HOME}/.config/autostart"
+rm -fr "${AUTOSTART}"
+mkdir -p "${AUTOSTART}"
+for service in "pulseaudio" "rhsm-icon" "spice-vdagent" "tracker-extract" "tracker-miner-apps" "tracker-miner-user-guides" "xfce4-power-manager" "xfce-polkit"; do
+  echo -e "[Desktop Entry]\nHidden=true" > "${AUTOSTART}/${service}.desktop"
+done
+
+# Check if KDE Plasma is available and use appropriate startup command
+if command -v startplasma-x11 >/dev/null 2>&1; then
+  echo "Starting KDE Plasma with startplasma-x11"
+  exec startplasma-x11
+elif command -v startkde >/dev/null 2>&1; then
+  echo "Starting KDE with startkde"
+  exec startkde
+elif command -v plasmashell >/dev/null 2>&1; then
+  echo "Starting KDE Plasma shell directly"
+  export KDE_FULL_SESSION=true
+  export DESKTOP_SESSION=plasma
+  if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    eval $(dbus-launch --sh-syntax)
+  fi
+  kwin_x11 &
+  exec plasmashell
+else
+  echo "KDE Plasma not properly installed, falling back to XFCE"
+  exec /usr/share/ondemand-desktops/xfce.sh
+fi
+EOFKDE
+
+chmod +x /usr/share/ondemand-desktops/*.sh
+
 # Mark controller as fully provisioned for compute nodes
 echo "🎯 Controller provisioning complete"
 echo "✅ Controller node fully configured and ready for compute nodes"

@@ -400,6 +400,12 @@ mkdir -p /usr/share/ondemand-desktops
 cat > /usr/share/ondemand-desktops/xfce.sh << 'EOFXFCE'
 #!/bin/bash
 
+export XAUTHORITY="${HOME}/.Xauthority"
+export DISPLAY="${DISPLAY:-:1}"
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+  eval $(dbus-launch --sh-syntax)
+fi
+
 # Remove any preconfigured monitors
 if [[ -f "${HOME}/.config/monitors.xml" ]]; then
   mv "${HOME}/.config/monitors.xml" "${HOME}/.config/monitors.xml.bak"
@@ -450,6 +456,12 @@ EOFXFCE
 # Create KDE desktop script for compute nodes  
 cat > /usr/share/ondemand-desktops/kde.sh << 'EOFKDE'
 #!/bin/bash
+
+export XAUTHORITY="${HOME}/.Xauthority"
+export DISPLAY="${DISPLAY:-:1}"
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+  eval $(dbus-launch --sh-syntax)
+fi
 
 # Disable useless services on autostart
 AUTOSTART="${HOME}/.config/autostart"

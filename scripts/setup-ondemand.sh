@@ -468,12 +468,18 @@ echo "🔧 Creating improved KDE desktop startup script..."
 cat <<'EOFKDE' | sudo tee /var/www/ood/apps/sys/bc_desktop/template/desktops/kde.sh
 #!/bin/bash
 
+export XAUTHORITY="${HOME}/.Xauthority"
+export DISPLAY="${DISPLAY:-:1}"
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+  eval $(dbus-launch --sh-syntax)
+fi
+
 # Disable useless services on autostart
 AUTOSTART="${HOME}/.config/autostart"
 rm -fr "${AUTOSTART}"    # clean up previous autostarts
 mkdir -p "${AUTOSTART}"
 for service in "pulseaudio" "rhsm-icon" "spice-vdagent" "tracker-extract" "tracker-miner-apps" "tracker-miner-user-guides" "xfce4-power-manager" "xfce-polkit"; do
-  echo -e "[Desktop Entry]\\nHidden=true" > "${AUTOSTART}/${service}.desktop"
+  echo -e "[Desktop Entry]\nHidden=true" > "${AUTOSTART}/${service}.desktop"
 done
 
 # Check if KDE Plasma is available and use appropriate startup command
@@ -485,14 +491,11 @@ elif command -v startkde >/dev/null 2>&1; then
   exec startkde
 elif command -v plasmashell >/dev/null 2>&1; then
   echo "Starting KDE Plasma shell directly"
-  # Set up basic KDE environment
   export KDE_FULL_SESSION=true
   export DESKTOP_SESSION=plasma
-  # Start D-Bus if needed
   if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
     eval $(dbus-launch --sh-syntax)
   fi
-  # Start KDE components
   kwin_x11 &
   exec plasmashell
 else

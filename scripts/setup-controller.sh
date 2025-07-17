@@ -43,7 +43,7 @@ wait_for_apt_locks 600 || {
     exit 1
 }
 apt-get update
-apt-get install -y nfs-kernel-server tigervnc-standalone-server tigervnc-common xfce4 xfce4-terminal kde-plasma-desktop firefox
+# NFS server, desktop environments, and VNC packages are now installed in setup-base.sh
 
 # Setup shared directory
 mkdir -p /shared
@@ -90,9 +90,41 @@ else
     export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"
 fi
 
-# Setup Munge authentication with new key for controller
+# Setup Munge authentication with shared key from host system
 systemctl enable munge
-dd if=/dev/urandom bs=1 count=1024 > /etc/munge/munge.key
+
+# Try to copy the shared munge key from host system configs
+MUNGE_KEY_COPIED=false
+
+# Define possible locations for the shared munge key on the host
+host_config_dirs=(
+    "/home/vagrant/scripts/configs"
+    "/home/ubuntu/scripts/configs"
+    "/opt/scripts/configs"
+    "/shared/scripts/configs"
+    "$(dirname "$0")/configs"
+)
+
+# Try each possible location for the shared munge key
+for config_dir in "${host_config_dirs[@]}"; do
+    if [ -f "${config_dir}/munge.key" ]; then
+        echo "📋 Copying shared munge key from: ${config_dir}/munge.key"
+        cp "${config_dir}/munge.key" /etc/munge/munge.key
+        MUNGE_KEY_COPIED=true
+        break
+    fi
+done
+
+# If no shared key found, create a new one as fallback
+if [ "$MUNGE_KEY_COPIED" = "false" ]; then
+    echo "⚠️ No shared munge key found in any expected location, creating new key as fallback"
+    echo "📋 Checked locations:"
+    for dir in "${host_config_dirs[@]}"; do
+        echo "   - ${dir}/munge.key"
+    done
+    dd if=/dev/urandom bs=1 count=1024 > /etc/munge/munge.key
+fi
+
 chown munge:munge /etc/munge/munge.key
 chmod 400 /etc/munge/munge.key
 
@@ -108,91 +140,40 @@ cp /etc/munge/munge.key /shared/
 chown slurm:slurm /shared/munge.key
 chmod 400 /shared/munge.key
 
-# Create slurm.conf
-cat > /etc/slurm/slurm.conf << 'EOF'
-# slurm.conf file generated for Vagrant cluster
-ClusterName=vagrant-cluster
-SlurmctldHost=slurm-controller
+# Copy Slurm configuration files from scripts/configs directory
+echo "📋 Copying Slurm configuration files from configs directory..."
 
-# Network
-SlurmctldPort=6817
-SlurmdPort=6818
+# Determine the source directory for configuration files
+CONFIG_SOURCE_DIR=""
+if [ -f "/home/ubuntu/scripts/configs/slurm.conf" ]; then
+    CONFIG_SOURCE_DIR="/home/ubuntu/scripts/configs"
+elif [ -f "/home/vagrant/scripts/configs/slurm.conf" ]; then
+    CONFIG_SOURCE_DIR="/home/vagrant/scripts/configs"
+elif [ -f "$(dirname "$0")/configs/slurm.conf" ]; then
+    CONFIG_SOURCE_DIR="$(dirname "$0")/configs"
+else
+    echo "ERROR: Could not find slurm.conf in any expected location"
+    echo "Expected locations:"
+    echo "  - /home/ubuntu/scripts/configs/slurm.conf"
+    echo "  - /home/vagrant/scripts/configs/slurm.conf"
+    echo "  - $(dirname "$0")/configs/slurm.conf"
+    exit 1
+fi
 
-# Authentication
-AuthType=auth/munge
-MpiDefault=pmix
+echo "✅ Found configuration files in: $CONFIG_SOURCE_DIR"
 
-# Scheduling
-SchedulerType=sched/backfill
-SelectType=select/cons_tres
-SelectTypeParameters=CR_Core
+# Copy slurm.conf
+cp "$CONFIG_SOURCE_DIR/slurm.conf" /etc/slurm/
+echo "✅ Copied slurm.conf"
 
-# Process tracking with cgroups v2
-ProctrackType=proctrack/cgroup
-TaskPlugin=task/affinity,task/cgroup
-SlurmdUser=root
+# Copy cgroup.conf
+cp "$CONFIG_SOURCE_DIR/cgroup.conf" /etc/slurm/
+echo "✅ Copied cgroup.conf"
 
-# Logging
-SlurmctldDebug=info
-SlurmdDebug=info
-SlurmctldLogFile=/var/log/slurm/slurmctld.log
-SlurmdLogFile=/var/log/slurm/slurmd.log
-
-# State info
-StateSaveLocation=/var/spool/slurmctld
-SlurmdSpoolDir=/var/spool/slurmd
-
-# Process IDs
-SlurmctldPidFile=/opt/slurm/var/run/slurmctld.pid
-SlurmdPidFile=/run/slurm/slurmd.pid
-
-# Timeouts
-SlurmctldTimeout=120
-SlurmdTimeout=300
-InactiveLimit=0
-MinJobAge=300
-KillWait=30
-Waittime=0
-
-# Return to service
-ReturnToService=1
-
-# Job completion
-JobCompType=jobcomp/none
-
-# Job accounting with cgroups v2 support
-JobAcctGatherType=jobacct_gather/cgroup
-JobAcctGatherFrequency=30
-
-# Accounting storage (connect to slurmdbd)
-AccountingStorageType=accounting_storage/slurmdbd
-AccountingStorageHost=localhost
-
-# Node definitions (controller + 2 compute nodes)
-NodeName=controller,node[1-2] CPUs=2 Sockets=1 CoresPerSocket=2 ThreadsPerCore=1 RealMemory=1800 State=UNKNOWN
-
-# Partition definitions (controller + 2 compute nodes)
-PartitionName=compute Nodes=controller,node[1-2] Default=YES MaxTime=INFINITE State=UP
-EOF
-
-# Copy slurm.conf to shared directory
+# Copy configuration files to shared directory for compute nodes
 cp /etc/slurm/slurm.conf /shared/
-
-# Create cgroup.conf for cgroups v2 support
-cat > /etc/slurm/cgroup.conf << 'EOF'
-# Cgroup configuration for Slurm with cgroups v2
-CgroupMountpoint="/sys/fs/cgroup"
-CgroupPlugin=cgroup/v2
-
-# Enable resource constraints
-ConstrainCores=yes
-ConstrainRAMSpace=yes
-ConstrainSwapSpace=no
-ConstrainDevices=yes
-EOF
-
-# Copy cgroup.conf to shared directory too
 cp /etc/slurm/cgroup.conf /shared/
+echo "✅ Configuration files copied to shared directory"
 
 # Create systemd service files  
 cat > /etc/systemd/system/slurmctld.service << 'EOF'

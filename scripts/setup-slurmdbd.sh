@@ -53,25 +53,13 @@ wait_for_apt_locks 600 || {
     exit 1
 }
 
-# Now try to install packages
-apt-get update || {
-    echo "ERROR: apt-get update failed"
+# Check that MariaDB was installed in setup-base.sh
+if ! command -v mysql >/dev/null 2>&1; then
+    echo "ERROR: MariaDB server not found. Should have been installed in setup-base.sh"
     exit 1
-}
+fi
 
-# Try to install MariaDB with robust error handling
-apt-get install -y mariadb-server || {
-    echo "ERROR: Failed to install MariaDB server"
-    echo "Checking apt/dpkg status..."
-    dpkg --configure -a || true
-    apt-get install -f -y || true
-    echo "Retrying MariaDB installation..."
-    wait_for_apt_locks 300
-    apt-get install -y mariadb-server || {
-        echo "ERROR: MariaDB installation failed after retry"
-        exit 1
-    }
-}
+echo "✅ MariaDB server already installed in base system"
 
 # Configure MariaDB for slurmdbd
 echo "🔧 Configuring MariaDB for slurmdbd..."

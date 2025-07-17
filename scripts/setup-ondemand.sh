@@ -1,5 +1,11 @@
 #!/bin/bash
 # setup-ondemand.sh - Automated Open OnDemand setup (official system package method)
+#
+# This script includes fixes for TigerVNC compatibility:
+# - Removes problematic -log parameter from VNC templates
+# - Uses basic template with custom VNC script for desktop app
+# - Installs websockify for VNC web interface
+# - Creates TigerVNC-compatible VNC server startup script
 
 # Parse command line arguments
 LINEAR_MODE=false
@@ -180,7 +186,7 @@ cat <<EOF | sudo tee /var/www/ood/apps/sys/bc_desktop/submit.yml.erb
 ---
 cluster: primedslurm
 batch_connect:
-  template: vnc
+  template: basic
 EOF
 
 # Update form.yml to include cluster and better defaults
@@ -217,18 +223,303 @@ form:
   - bc_email_on_started
 EOF
 
-# Install desktop environments for the Interactive Desktop feature
-echo "📦 Installing desktop environments..."
-sudo apt update
-sudo apt install -y xfce4 xfce4-terminal kde-plasma-desktop firefox || echo "⚠️ Desktop packages installation had issues"
+# 8.1.1. Fix VNC template issues for TigerVNC compatibility
+echo "🔧 Fixing VNC template compatibility issues..."
 
-# Install VNC server for OnDemand Interactive Desktop
-sudo apt install -y tigervnc-standalone-server tigervnc-common || echo "⚠️ VNC server installation had issues"
+# Create backups of VNC template files
+sudo cp /opt/ood/gems/gems/ood_core-0.27.1/lib/ood_core/batch_connect/templates/vnc.rb /opt/ood/gems/gems/ood_core-0.27.1/lib/ood_core/batch_connect/templates/vnc.rb.backup 2>/dev/null || true
+sudo cp /opt/ood/gems/gems/ood_core-0.27.1/lib/ood_core/batch_connect/templates/vnc_container.rb /opt/ood/gems/gems/ood_core-0.27.1/lib/ood_core/batch_connect/templates/vnc_container.rb.backup 2>/dev/null || true
 
-# Install Python and Jupyter for OnDemand Jupyter app
-echo "📊 Installing Python and Jupyter..."
-sudo apt install -y python3 python3-pip python3-venv || echo "⚠️ Python packages installation had issues"
-sudo pip3 install jupyter jupyterlab numpy pandas matplotlib seaborn || echo "⚠️ Jupyter/ML packages installation had issues"
+# Fix vnc.rb template - remove problematic -log parameter
+sudo sed -i 's/vncserver -log "#{vnc_log}" -rfbauth/vncserver -rfbauth/g' /opt/ood/gems/gems/ood_core-0.27.1/lib/ood_core/batch_connect/templates/vnc.rb
+
+# Fix vnc_container.rb template - remove problematic -log parameter  
+sudo sed -i 's/vncserver -log "#{vnc_log}" -rfbauth/vncserver -rfbauth/g' /opt/ood/gems/gems/ood_core-0.27.1/lib/ood_core/batch_connect/templates/vnc_container.rb
+
+# Create custom VNC script template for desktop app that works with TigerVNC
+cat <<'VNCSOF' | sudo tee /var/www/ood/apps/sys/bc_desktop/template/script.sh.erb
+#!/usr/bin/env bash
+
+# Clean up function with proper error handling
+clean_up () {
+  echo "Cleaning up..."
+  # Kill VNC server if display is set and valid
+  if [[ -n "${display}" && "${display}" =~ ^[0-9]+$ ]]; then
+    echo "Killing VNC server on display :${display}"
+    vncserver -kill :${display} 2>/dev/null || true
+  fi
+  
+  # Kill websockify if running
+  if [[ -n "${websockify_pid}" && "${websockify_pid}" =~ ^[0-9]+$ ]]; then
+    echo "Killing websockify process ${websockify_pid}"
+    kill ${websockify_pid} 2>/dev/null || true
+  fi
+  
+  # Clean up any remaining child processes
+  pkill -P $$ 2>/dev/null || true
+  exit ${1:-0}
+}
+
+# Trap signals to ensure cleanup
+trap 'clean_up 1' TERM INT
+
+# Function to create random password
+create_passwd () {
+  local size=${1:-12}
+  tr -cd '[:alnum:]' < /dev/urandom | fold -w${size} | head -n1
+}
+
+# Function to find available port
+find_port () {
+  local port
+  # Start from port 8080 and find first available
+  for port in {8080..8180}; do
+    if ! ss -tuln | grep -q :${port}; then
+      echo ${port}
+      return 0
+    fi
+  done
+  return 1
+}
+
+echo "Script starting..."
+
+# Set up VNC password
+echo "Generating VNC password"
+password=$(create_passwd 12)
+spassword=${spassword:-$(create_passwd 12)}
+(
+  umask 077
+  echo "Created VNC password file"
+  echo -ne "${password}\\n${spassword}" | vncpasswd -f > "vnc.passwd"
+)
+
+echo "Starting VNC desktop session..."
+
+# Clean up any old VNC sessions
+vncserver -list | awk '/^:/{system("kill -0 "$2" 2>/dev/null || vncserver -kill "$1)}' 2>/dev/null || true
+
+# Set geometry and idle timeout with proper defaults
+GEOMETRY="<%= context.bc_vnc_resolution.to_s.empty? ? "1024x768" : context.bc_vnc_resolution %>"
+IDLE_TIMEOUT="<%= context.bc_vnc_idle.to_i == 0 ? "0" : context.bc_vnc_idle %>"
+
+echo "Using geometry: ${GEOMETRY}, idle timeout: ${IDLE_TIMEOUT}"
+
+# Try to start VNC server
+display=""
+for i in $(seq 1 10); do
+  echo "Attempt ${i} to start VNC server..."
+  
+  # Check for TurboVNC compatibility
+  HTTPD_OPT=""
+  if timeout 2 vncserver --help 2>&1 | grep 'nohttpd' >/dev/null 2>&1; then
+    HTTPD_OPT="-nohttpd"
+  fi
+
+  # Start VNC server without problematic -log parameter
+  VNC_OUT=$(vncserver -rfbauth "vnc.passwd" $HTTPD_OPT -noxstartup -geometry "${GEOMETRY}" -idletimeout "${IDLE_TIMEOUT}" 2>&1)
+  echo "VNC output: "
+  echo "${VNC_OUT}"
+  
+  # Parse display number from output - fix the arithmetic error
+  display=$(echo "${VNC_OUT}" | grep -o 'display :[0-9]*' | cut -d':' -f2 | tr -d ' ')
+  if [[ -z "${display}" ]]; then
+    display=$(echo "${VNC_OUT}" | grep -o ':[0-9]*' | head -1 | cut -d':' -f2)
+  fi
+  
+  # Validate display is a number
+  if [[ -n "${display}" && "${display}" =~ ^[0-9]+$ ]]; then
+    echo "VNC server started on display :${display}."
+    break
+  else
+    echo "Failed to start VNC server or parse display, trying again..."
+    display=""
+    sleep 1
+  fi
+done
+
+# Check if we got a valid display
+if [[ -z "${display}" || ! "${display}" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: Failed to start VNC server after 10 attempts"
+  clean_up 1
+fi
+
+# Calculate port safely
+port=$((5900 + display))
+echo "VNC server running on port ${port}"
+
+# Set up X authorization properly
+echo "Setting up X authorization..."
+export DISPLAY=:${display}
+export XAUTHORITY="${HOME}/.Xauthority"
+
+# Wait a moment for VNC server to fully initialize
+sleep 3
+
+# Test X server connection
+echo "Testing X server connection..."
+if ! timeout 10 xset q >/dev/null 2>&1; then
+  echo "WARNING: X server connection test failed, but continuing..."
+else
+  echo "X server connection test successful"
+fi
+
+# Start websockify
+websocket=$(find_port)
+if [[ $? -ne 0 ]]; then
+  echo "ERROR: Could not find available port for websockify"
+  clean_up 1
+fi
+
+echo "Starting websockify on port ${websocket}..."
+
+# Check if websockify exists
+WEBSOCKIFY_CMD=""
+for path in "/opt/websockify/run" "/usr/bin/websockify" "/usr/local/bin/websockify"; do
+  if [[ -x "$path" ]]; then
+    WEBSOCKIFY_CMD="$path"
+    break
+  fi
+done
+
+if [[ -z "$WEBSOCKIFY_CMD" ]]; then
+  echo "ERROR: websockify not found"
+  clean_up 1
+fi
+
+# Start websockify in background
+$WEBSOCKIFY_CMD -D ${websocket} localhost:${port} &
+websockify_pid=$!
+echo "Started websockify with PID ${websockify_pid}"
+
+# Create connection info
+echo "Created connection.yml file"
+cat > connection.yml << EOL
+host: ${HOSTNAME}
+port: ${port}
+password: ${password}
+spassword: ${spassword}
+display: ${display}
+websocket: ${websocket}
+EOL
+
+# Change to user home directory
+cd "${HOME}"
+
+# Set up background process for password reset on connections
+(
+  while read -r line; do
+    if [[ ${line} =~ "Full-control authentication enabled for" ]]; then
+      password=$(create_passwd 12)
+      spassword=$(create_passwd 12)
+      (
+        umask 077
+        echo -ne "${password}\\n${spassword}" | vncpasswd -f > "vnc.passwd"
+      )
+      cat > connection.yml << EOL
+host: ${HOSTNAME}
+port: ${port}
+password: ${password}
+spassword: ${spassword}
+display: ${display}
+websocket: ${websocket}
+EOL
+    fi
+  done < <(tail -f --pid=$$ "${HOME}/.vnc/$(hostname):${display}.log" 2>/dev/null)
+) &
+
+# Launch desktop environment
+desktop_env="<%= context.desktop %>"
+echo "Launching ${desktop_env} desktop..."
+
+desktop_script="<%= session.staged_root.join("desktops", "#{context.desktop}.sh") %>"
+echo "Desktop script: ${desktop_script}"
+
+if [[ -f "${desktop_script}" ]]; then
+  echo "Executing desktop script..."
+  # Export DISPLAY variable properly for the desktop session
+  export DISPLAY=:${display}
+  echo "DISPLAY set to: $DISPLAY"
+  
+  # Test X server connection before starting desktop
+  if ! timeout 10 xhost >/dev/null 2>&1; then
+    echo "WARNING: X server connection test failed, but continuing..."
+  fi
+  
+  # Execute the desktop script
+  bash "${desktop_script}"
+  desktop_exit_code=$?
+  echo "Desktop '${desktop_env}' ended with ${desktop_exit_code} status..."
+else
+  echo "ERROR: Desktop script not found: ${desktop_script}"
+  echo "Available desktop scripts:"
+  ls -la "<%= session.staged_root.join("desktops") %>" 2>/dev/null || echo "Desktop directory not found"
+  clean_up 1
+fi
+
+echo "Script completed, calling cleanup..."
+clean_up
+VNCSOF
+
+echo "✅ VNC template fixes applied for TigerVNC compatibility"
+
+# Create improved KDE desktop script
+echo "🔧 Creating improved KDE desktop startup script..."
+cat <<'EOFKDE' | sudo tee /var/www/ood/apps/sys/bc_desktop/template/desktops/kde.sh
+#!/bin/bash
+
+# Disable useless services on autostart
+AUTOSTART="${HOME}/.config/autostart"
+rm -fr "${AUTOSTART}"    # clean up previous autostarts
+mkdir -p "${AUTOSTART}"
+for service in "pulseaudio" "rhsm-icon" "spice-vdagent" "tracker-extract" "tracker-miner-apps" "tracker-miner-user-guides" "xfce4-power-manager" "xfce-polkit"; do
+  echo -e "[Desktop Entry]\\nHidden=true" > "${AUTOSTART}/${service}.desktop"
+done
+
+# Check if KDE Plasma is available and use appropriate startup command
+if command -v startplasma-x11 >/dev/null 2>&1; then
+  echo "Starting KDE Plasma with startplasma-x11"
+  exec startplasma-x11
+elif command -v startkde >/dev/null 2>&1; then
+  echo "Starting KDE with startkde"
+  exec startkde
+elif command -v plasmashell >/dev/null 2>&1; then
+  echo "Starting KDE Plasma shell directly"
+  # Set up basic KDE environment
+  export KDE_FULL_SESSION=true
+  export DESKTOP_SESSION=plasma
+  # Start D-Bus if needed
+  if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    eval $(dbus-launch --sh-syntax)
+  fi
+  # Start KDE components
+  kwin_x11 &
+  exec plasmashell
+else
+  echo "KDE Plasma not properly installed, falling back to basic X session"
+  # Fall back to a basic window manager if available
+  if command -v openbox >/dev/null 2>&1; then
+    echo "Starting Openbox window manager"
+    exec openbox-session
+  elif command -v fvwm >/dev/null 2>&1; then
+    echo "Starting FVWM window manager"  
+    exec fvwm
+  elif command -v xfce4-session >/dev/null 2>&1; then
+    echo "Falling back to XFCE session"
+    exec xfce4-session
+  else
+    echo "No suitable desktop environment found, starting basic X session"
+    xterm -geometry 80x50+494+51 &
+    xterm -geometry 80x20+494-0 &
+    exec twm
+  fi
+fi
+EOFKDE
+
+sudo chmod +x /var/www/ood/apps/sys/bc_desktop/template/desktops/kde.sh
+
+# Desktop environments, VNC, and Python/Jupyter packages are now installed in setup-base.sh
+echo "📦 Desktop environments and VNC packages already installed in base system"
 
 # 8.3. Configure Jupyter Notebook app
 echo "📊 Configuring Jupyter Notebook app..."
@@ -386,9 +677,10 @@ echo "✅ Open OnDemand setup complete!"
 echo "🌐 Access Open OnDemand at: http://$(hostname -I | awk '{print $1}')/"
 echo "👤 Login with username: ooduser, password: ooduser"
 echo
-echo "🖥️ Interactive Desktop should now work properly with cluster: primedslurm"
+echo "🖥️ Interactive Desktop app now works with TigerVNC (fixed -Log parameter issue)"
 echo "📋 Available desktop environments: XFCE (default), KDE Plasma, GNOME"
 echo "📊 Jupyter Notebook/Lab app is now available for data science workflows"
+echo "🔧 VNC templates have been patched for TigerVNC compatibility"
 echo
 echo "Next steps:"
 echo "  • For production, set up proper authentication (LDAP, CAS, etc.)"

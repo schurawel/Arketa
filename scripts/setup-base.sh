@@ -65,6 +65,21 @@ apt-get install -y \
     mariadb-server mariadb-client libmariadb-dev \
     htop tree tmux screen
 
+# Install desktop environments and VNC packages for Interactive Desktop
+# These packages were consolidated from setup-controller.sh, setup-compute.sh, and setup-ondemand.sh
+# to eliminate redundant installations across multiple nodes
+log "Installing desktop environments and VNC packages..."
+apt-get install -y \
+    xfce4 xfce4-terminal plasma-desktop kwin-x11 kde-plasma-desktop plasma-workspace \
+    firefox tigervnc-standalone-server tigervnc-common websockify \
+    dbus-x11 xauth xfonts-base xfonts-75dpi xfonts-100dpi
+
+# Install Python virtual environment and Jupyter packages
+# Consolidated from setup-ondemand.sh to provide Jupyter support across all nodes
+log "Installing Python virtual environment and Jupyter packages..."
+python3 -m pip install --upgrade pip
+pip3 install jupyter jupyterlab numpy pandas matplotlib seaborn
+
 # Install Go
 log "Installing Go ${GO_VERSION}..."
 if [ ! -d "/usr/local/go" ]; then
@@ -309,5 +324,11 @@ log "Base system includes:"
 log "  ✅ System packages and build tools"
 log "  ✅ Go ${GO_VERSION}"
 log "  ✅ Apptainer ${APPTAINER_VERSION}"
+log "  ✅ Desktop environments (XFCE, KDE Plasma)"
+log "  ✅ VNC server and websockify"
+log "  ✅ X11 support packages"
+log "  ✅ Python 3 and Jupyter ecosystem"
+log "  ✅ MariaDB server and client"
+log "  ✅ NFS server and client"
 log "  ✅ Slurm user account"
 log "  $([ -f "/opt/slurm/bin/sinfo" ] && echo "✅ Slurm from source" || echo "⚠️  Slurm not installed (source not available)")"

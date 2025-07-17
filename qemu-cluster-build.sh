@@ -298,7 +298,7 @@ start_cluster_vms() {
     
     # Check if all VM images exist
     if ! check_image "$CONTROLLER_IMAGE"; then
-        echo -e "${RED}Error: Controller VM image not found. You must run build-controller first!${NC}"
+        echo -e "${RED}Error: Controller VM image not found at $CONTROLLER_IMAGE. You must run build-controller first!${NC}"
         exit 1
     fi
     
@@ -307,113 +307,191 @@ start_cluster_vms() {
         exit 1
     fi
     
+    # Create necessary directories first
+    create_directories
+    
     # Ensure virtual switch is setup
     setup_virtual_switch
     
+    # Clean up any existing TAP devices
+    echo -e "${BLUE}Cleaning up existing TAP devices...${NC}"
+    for i in 0 1 2; do
+        sudo ip link delete "tap${i}" 2>/dev/null || true
+    done
+    sleep 2
+    
     # Set TAP permissions properly before starting VMs
     echo -e "${BLUE}Setting proper permissions for TAP devices...${NC}"
-    sudo ip tuntap add dev tap0 mode tap user $(whoami)
-    sudo ip link set dev tap0 up
-    sudo ovs-vsctl --may-exist add-port $BRIDGE_NAME tap0
+    for i in 0 1 2; do
+        echo -e "${BLUE}Setting up tap${i}...${NC}"
+        sudo ip tuntap add dev "tap${i}" mode tap user $(whoami)
+        sudo ip link set dev "tap${i}" up
+        sudo ovs-vsctl --may-exist add-port $BRIDGE_NAME "tap${i}"
+    done
     
-    sudo ip tuntap add dev tap1 mode tap user $(whoami)
-    sudo ip link set dev tap1 up
-    sudo ovs-vsctl --may-exist add-port $BRIDGE_NAME tap1
+    # Ensure /dev/net/tun has correct permissions
+    sudo chmod 666 /dev/net/tun 2>/dev/null || true
     
-    sudo ip tuntap add dev tap2 mode tap user $(whoami)
-    sudo ip link set dev tap2 up
-    sudo ovs-vsctl --may-exist add-port $BRIDGE_NAME tap2
+    # Start controller VM directly
+    echo -e "${BLUE}Starting controller VM...${NC}"
+    echo -e "${YELLOW}Controller image path: ${CONTROLLER_IMAGE}${NC}"
     
-    sudo chown $(whoami) /dev/net/tun
+    # Print tap0 info
+    echo -e "${BLUE}TAP0 configuration:${NC}"
+    ip link show tap0 || echo "tap0 not found!"
     
-    # Create VM start scripts for xterm windows
-    
-    # Controller VM script - removed sudo from exec line
-    CONTROLLER_SCRIPT="${TMP_DIR}/start_controller.sh"
-    cat > "${CONTROLLER_SCRIPT}" <<EOF
-#!/bin/bash
-echo "Starting Slurm controller VM..."
-
-export QEMU_AUDIO_DRV=none
-
-# Run QEMU with TAP networking (removed sudo from exec line)
-exec qemu-system-x86_64 -m 4096 -smp 4 \\
-    -enable-kvm \\
-    -cpu host \\
-    -drive file="${CONTROLLER_IMAGE}",format=qcow2 \\
-    -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \\
-    -device virtio-net-pci,netdev=net0,mac=${CONTROLLER_MAC} \\
-    -nographic \\
-    -serial mon:stdio \\
-    -name "slurm-controller"
-EOF
-    chmod +x "${CONTROLLER_SCRIPT}"
-    
-    # Node1 VM script - removed sudo from exec line
-    NODE1_SCRIPT="${TMP_DIR}/start_node1.sh"
-    cat > "${NODE1_SCRIPT}" <<EOF
-#!/bin/bash
-echo "Starting Slurm node1 VM..."
-
-export QEMU_AUDIO_DRV=none
-
-# Run QEMU with TAP networking (removed sudo from exec line)
-exec qemu-system-x86_64 -m 4096 -smp 4 \\
-    -enable-kvm \\
-    -cpu host \\
-    -drive file="${NODE1_IMAGE}",format=qcow2 \\
-    -netdev tap,id=net0,ifname=tap1,script=no,downscript=no \\
-    -device virtio-net-pci,netdev=net0,mac=${NODE1_MAC} \\
-    -nographic \\
-    -serial mon:stdio \\
-    -name "slurm-node1"
-EOF
-    chmod +x "${NODE1_SCRIPT}"
-    
-    # Node2 VM script - removed sudo from exec line
-    NODE2_SCRIPT="${TMP_DIR}/start_node2.sh"
-    cat > "${NODE2_SCRIPT}" <<EOF
-#!/bin/bash
-echo "Starting Slurm node2 VM..."
-
-export QEMU_AUDIO_DRV=none
-
-# Run QEMU with TAP networking (removed sudo from exec line)
-exec qemu-system-x86_64 -m 4096 -smp 4 \\
-    -enable-kvm \\
-    -cpu host \\
-    -drive file="${NODE2_IMAGE}",format=qcow2 \\
-    -netdev tap,id=net0,ifname=tap2,script=no,downscript=no \\
-    -device virtio-net-pci,netdev=net0,mac=${NODE2_MAC} \\
-    -nographic \\
-    -serial mon:stdio \\
-    -name "slurm-node2"
-EOF
-    chmod +x "${NODE2_SCRIPT}"
-    
-    # Start VMs in xterm windows
-    echo -e "${BLUE}Starting controller VM in xterm...${NC}"
-    xterm -title "Slurm Controller" -e "${CONTROLLER_SCRIPT}" &
+    # Start VMs with xterm -hold option to keep window open if command fails
+    xterm -hold -title "Slurm Controller" -e "
+        echo 'Starting controller VM...'
+        echo 'Controller image: ${CONTROLLER_IMAGE}'
+        echo 'Controller MAC: ${CONTROLLER_MAC}'
+        echo 'TAP device: tap0'
+        
+        # Check if image exists
+        if [ ! -f '${CONTROLLER_IMAGE}' ]; then
+            echo 'ERROR: Controller image ${CONTROLLER_IMAGE} not found!'
+            sleep 30
+            exit 1
+        fi
+        
+        # Check tap device
+        if ! ip link show tap0 > /dev/null 2>&1; then
+            echo 'ERROR: tap0 device not found!'
+            sleep 30
+            exit 1
+        fi
+        
+        # Run QEMU
+        qemu-system-x86_64 -m 4096 -smp 4 \
+            -enable-kvm \
+            -cpu host \
+            -drive file='${CONTROLLER_IMAGE}',format=qcow2 \
+            -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
+            -device virtio-net-pci,netdev=net0,mac=${CONTROLLER_MAC} \
+            -nographic \
+            -serial mon:stdio \
+            -name 'slurm-controller'
+        
+        # If QEMU exits, show error and wait
+        echo 'Controller VM exited. Check for errors above.'
+        sleep 30
+    " &
     
     sleep 5
     
-    echo -e "${BLUE}Starting node1 VM in xterm...${NC}"
-    xterm -title "Slurm Node1" -e "${NODE1_SCRIPT}" &
+    # Start node1 VM directly
+    echo -e "${BLUE}Starting node1 VM...${NC}"
+    echo -e "${YELLOW}Node1 image path: ${NODE1_IMAGE}${NC}"
+    
+    xterm -hold -title "Slurm Node1" -e "
+        echo 'Starting node1 VM...'
+        echo 'Node1 image: ${NODE1_IMAGE}'
+        echo 'Node1 MAC: ${NODE1_MAC}'
+        echo 'TAP device: tap1'
+        
+        # Check if image exists
+        if [ ! -f '${NODE1_IMAGE}' ]; then
+            echo 'ERROR: Node1 image ${NODE1_IMAGE} not found!'
+            sleep 30
+            exit 1
+        fi
+        
+        # Check tap device
+        if ! ip link show tap1 > /dev/null 2>&1; then
+            echo 'ERROR: tap1 device not found!'
+            sleep 30
+            exit 1
+        fi
+        
+        # Run QEMU
+        qemu-system-x86_64 -m 4096 -smp 4 \
+            -enable-kvm \
+            -cpu host \
+            -drive file='${NODE1_IMAGE}',format=qcow2 \
+            -netdev tap,id=net0,ifname=tap1,script=no,downscript=no \
+            -device virtio-net-pci,netdev=net0,mac=${NODE1_MAC} \
+            -nographic \
+            -serial mon:stdio \
+            -name 'slurm-node1'
+        
+        # If QEMU exits, show error and wait
+        echo 'Node1 VM exited. Check for errors above.'
+        sleep 30
+    " &
     
     sleep 5
     
-    echo -e "${BLUE}Starting node2 VM in xterm...${NC}"
-    xterm -title "Slurm Node2" -e "${NODE2_SCRIPT}" &
+    # Start node2 VM directly
+    echo -e "${BLUE}Starting node2 VM...${NC}"
+    echo -e "${YELLOW}Node2 image path: ${NODE2_IMAGE}${NC}"
+    
+    xterm -hold -title "Slurm Node2" -e "
+        echo 'Starting node2 VM...'
+        echo 'Node2 image: ${NODE2_IMAGE}'
+        echo 'Node2 MAC: ${NODE2_MAC}'
+        echo 'TAP device: tap2'
+        
+        # Check if image exists
+        if [ ! -f '${NODE2_IMAGE}' ]; then
+            echo 'ERROR: Node2 image ${NODE2_IMAGE} not found!'
+            sleep 30
+            exit 1
+        fi
+        
+        # Check tap device
+        if ! ip link show tap2 > /dev/null 2>&1; then
+            echo 'ERROR: tap2 device not found!'
+            sleep 30
+            exit 1
+        fi
+        
+        # Run QEMU
+        qemu-system-x86_64 -m 4096 -smp 4 \
+            -enable-kvm \
+            -cpu host \
+            -drive file='${NODE2_IMAGE}',format=qcow2 \
+            -netdev tap,id=net0,ifname=tap2,script=no,downscript=no \
+            -device virtio-net-pci,netdev=net0,mac=${NODE2_MAC} \
+            -nographic \
+            -serial mon:stdio \
+            -name 'slurm-node2'
+        
+        # If QEMU exits, show error and wait
+        echo 'Node2 VM exited. Check for errors above.'
+        sleep 30
+    " &
     
     echo -e "${BLUE}Waiting for VMs to boot...${NC}"
     sleep 20
+    
+    # Check if QEMU processes are actually running
+    echo -e "${BLUE}Checking if VMs are running...${NC}"
+    if pgrep -f "qemu.*slurm-controller" > /dev/null; then
+        echo -e "${GREEN}✓ Controller VM is running${NC}"
+    else
+        echo -e "${RED}✗ Controller VM is not running${NC}"
+    fi
+    
+    if pgrep -f "qemu.*slurm-node1" > /dev/null; then
+        echo -e "${GREEN}✓ Node1 VM is running${NC}"
+    else
+        echo -e "${RED}✗ Node1 VM is not running${NC}"
+    fi
+    
+    if pgrep -f "qemu.*slurm-node2" > /dev/null; then
+        echo -e "${GREEN}✓ Node2 VM is running${NC}"
+    else
+        echo -e "${RED}✗ Node2 VM is not running${NC}"
+    fi
     
     # Always ask the user if they want to update configurations
     echo -e "${YELLOW}Would you like to update Slurm configurations on compute nodes from controller?${NC}"
     echo -e "${BLUE}This is recommended if:${NC}"
     echo -e "  - This is a first start after linear mode setup"
-    echo -e "  - You've made changes to Slurm configuration"
+    echo -e "  - You've made changes to Slurm configuration files in scripts/configs/"
     echo -e "  - Compute nodes aren't connecting to the controller properly"
+    echo -e "${GREEN}Note: Configuration copying is now automated during setup, but this manual"
+    echo -e "      update can be useful if you've modified config files after initial setup.${NC}"
     read -p "Update configurations? (y/n): " update_configs
     
     case "$update_configs" in
@@ -428,8 +506,10 @@ EOF
 }
 
 # Function to update slurm configuration on compute nodes from controller
+# Note: This is now automated during setup, but can be used for manual updates
 update_compute_config() {
-    echo -e "${BLUE}=== Updating Slurm configuration on compute nodes ===${NC}"
+    echo -e "${BLUE}=== Manually updating Slurm configuration on compute nodes ===${NC}"
+    echo -e "${GREEN}(Configuration copying is now automated via scp in setup-compute.sh)${NC}"
     
     # Wait for controller to be accessible
     echo -e "${BLUE}Waiting for controller to be accessible...${NC}"
@@ -1440,6 +1520,26 @@ prompt_setup_mode() {
     sleep 2
 }
 
+# Function to create shared munge key for cluster authentication
+create_shared_munge_key() {
+    echo -e "${BLUE}Creating shared munge key for cluster authentication...${NC}"
+    
+    local munge_key_path="${SCRIPTS_DIR}/configs/munge.key"
+    
+    # Create configs directory if it doesn't exist
+    mkdir -p "${SCRIPTS_DIR}/configs"
+    
+    # Create munge key if it doesn't exist or if we want to regenerate it
+    if [ ! -f "$munge_key_path" ]; then
+        echo -e "${BLUE}Generating new munge key...${NC}"
+        dd if=/dev/urandom bs=1 count=1024 > "$munge_key_path" 2>/dev/null
+        chmod 400 "$munge_key_path"
+        echo -e "${GREEN}✅ Shared munge key created at: ${munge_key_path}${NC}"
+    else
+        echo -e "${GREEN}✅ Using existing shared munge key: ${munge_key_path}${NC}"
+    fi
+}
+
 # Main script logic
 case "${1:-build}" in
     build-base)
@@ -1457,6 +1557,9 @@ case "${1:-build}" in
     build)
         # Ask user for setup mode
         prompt_setup_mode
+        
+        # Create shared munge key for cluster authentication
+        create_shared_munge_key
         
         echo -e "${GREEN}Building Complete QEMU Slurm Cluster${NC}"
         

@@ -43,7 +43,7 @@ hostnamectl set-hostname node${NODE_ID}
 # Install NFS client and setup shared directory (moved from Vagrantfile)
 echo "Installing NFS client and setting up shared directory..."
 apt-get update
-apt-get install -y nfs-common tigervnc-standalone-server tigervnc-common xfce4 xfce4-terminal kde-plasma-desktop firefox
+# NFS client, desktop environments, VNC, and X11 packages are now installed in setup-base.sh
 
 # Mount shared directory and setup fstab
 mkdir -p /shared
@@ -146,31 +146,154 @@ else
     done
 fi
 
-# Copy configuration from controller - modified to handle linear mode
-if [ "$LINEAR_MODE" = "true" ]; then
-    # In linear mode, just ensure the files exist
-    [ -f /shared/slurm.conf ] && cp /shared/slurm.conf /etc/slurm/ || echo "📋 Linear mode: Using placeholder slurm.conf"
-    [ -f /shared/cgroup.conf ] && cp /shared/cgroup.conf /etc/slurm/ || echo "📋 Linear mode: Using placeholder cgroup.conf"
-    [ -f /shared/munge.key ] && cp /shared/munge.key /etc/munge/ || echo "📋 Linear mode: Using placeholder munge.key"
-else
-    # In regular mode, wait for the files
-    while [ ! -f /shared/slurm.conf ]; do
-        echo "Waiting for slurm.conf from controller..."
-        sleep 5
-    done
-
-    cp /shared/slurm.conf /etc/slurm/
-
-    # Copy cgroup.conf from controller
-    while [ ! -f /shared/cgroup.conf ]; do
-        echo "Waiting for cgroup.conf from controller..."
-        sleep 5
-    done
-
-    cp /shared/cgroup.conf /etc/slurm/
+# Function to copy configuration files from host system
+copy_configs_from_host() {
+    echo "🔄 Copying Slurm configuration files from host system..."
     
-    # Setup Munge authentication with shared key
-    cp /shared/munge.key /etc/munge/munge.key
+    # Define possible locations for the config files on the host
+    local host_config_dirs=(
+        "/home/vagrant/scripts/configs"
+        "/home/ubuntu/scripts/configs"
+        "/opt/scripts/configs"
+        "/shared/scripts/configs"
+    )
+    
+    local found_configs=false
+    
+    # Try each possible location
+    for config_dir in "${host_config_dirs[@]}"; do
+        if [ -f "$config_dir/slurm.conf" ] && [ -f "$config_dir/cgroup.conf" ]; then
+            echo "✅ Found configuration files in $config_dir"
+            
+            # Copy slurm.conf
+            if cp "$config_dir/slurm.conf" /etc/slurm/; then
+                echo "✅ slurm.conf copied successfully"
+            else
+                echo "❌ Failed to copy slurm.conf"
+                continue
+            fi
+            
+            # Copy cgroup.conf
+            if cp "$config_dir/cgroup.conf" /etc/slurm/; then
+                echo "✅ cgroup.conf copied successfully"
+            else
+                echo "❌ Failed to copy cgroup.conf"
+                continue
+            fi
+            
+            found_configs=true
+            break
+        fi
+    done
+    
+    if [ "$found_configs" = false ]; then
+        echo "❌ Could not find configuration files in any expected location"
+        echo "📋 Checked locations:"
+        for dir in "${host_config_dirs[@]}"; do
+            echo "   - $dir"
+        done
+        return 1
+    fi
+    
+    # Handle munge key - try shared munge key from host configs first
+    MUNGE_KEY_COPIED=false
+    
+    # Try to copy shared munge key from host system configs
+    for dir in "${host_config_dirs[@]}"; do
+        if [ -f "${dir}/munge.key" ]; then
+            cp "${dir}/munge.key" /etc/munge/
+            echo "✅ Shared munge key copied from host configs: ${dir}/munge.key"
+            MUNGE_KEY_COPIED=true
+            break
+        fi
+    done
+    
+    # If no shared key from host configs, try NFS shared directory
+    if [ "$MUNGE_KEY_COPIED" = "false" ] && [ -f /shared/munge.key ]; then
+        cp /shared/munge.key /etc/munge/
+        echo "✅ munge.key copied from NFS shared directory"
+        MUNGE_KEY_COPIED=true
+    fi
+    
+    # Create new key as last resort
+    if [ "$MUNGE_KEY_COPIED" = "false" ]; then
+        echo "📋 Creating new munge key for compute node..."
+        dd if=/dev/urandom bs=1 count=1024 > /etc/munge/munge.key 2>/dev/null
+        echo "⚠️ Created local munge key - controller sync may be needed"
+    fi
+    
+    echo "🎯 Configuration files copied successfully from host system"
+    return 0
+}
+
+# Copy configuration from host system - try host config files first, then fall back to NFS
+echo "📡 Copying Slurm configuration files from host system..."
+
+if [ "$LINEAR_MODE" = "true" ]; then
+    # In linear mode, try host configs first, then create placeholders if needed
+    if ! copy_configs_from_host; then
+        echo "📋 Linear mode: host config copy failed, creating placeholder files..."
+        [ -f /shared/slurm.conf ] && cp /shared/slurm.conf /etc/slurm/ || touch /etc/slurm/slurm.conf
+        [ -f /shared/cgroup.conf ] && cp /shared/cgroup.conf /etc/slurm/ || touch /etc/slurm/cgroup.conf
+        
+        # Try to find shared munge key from comprehensive list of sources
+        MUNGE_KEY_FOUND=false
+        host_config_dirs=(
+            "/home/vagrant/scripts/configs"
+            "/home/ubuntu/scripts/configs"
+            "/opt/scripts/configs"
+            "/shared/scripts/configs"
+        )
+        
+        # Check host config directories first
+        for config_dir in "${host_config_dirs[@]}"; do
+            if [ -f "${config_dir}/munge.key" ]; then
+                cp "${config_dir}/munge.key" /etc/munge/munge.key
+                echo "📋 Linear mode: Copied shared munge key from ${config_dir}/munge.key"
+                MUNGE_KEY_FOUND=true
+                break
+            fi
+        done
+        
+        # Fall back to NFS shared directory
+        if [ "$MUNGE_KEY_FOUND" = "false" ] && [ -f "/shared/munge.key" ]; then
+            cp "/shared/munge.key" /etc/munge/munge.key
+            echo "📋 Linear mode: Copied munge key from NFS shared directory"
+            MUNGE_KEY_FOUND=true
+        fi
+        
+        # Create new key as last resort
+        if [ "$MUNGE_KEY_FOUND" = "false" ]; then
+            dd if=/dev/urandom bs=1 count=1024 > /etc/munge/munge.key 2>/dev/null
+            echo "📋 Linear mode: Created placeholder munge key"
+        fi
+    fi
+else
+    # In regular mode, try host configs first, then fall back to NFS
+    if copy_configs_from_host; then
+        echo "✅ Configuration files copied from host system"
+    else
+        echo "📂 Falling back to NFS-based configuration copying..."
+        
+        # Original NFS-based method as fallback
+        while [ ! -f /shared/slurm.conf ]; do
+            echo "Waiting for slurm.conf from controller..."
+            sleep 5
+        done
+
+        cp /shared/slurm.conf /etc/slurm/
+
+        # Copy cgroup.conf from controller
+        while [ ! -f /shared/cgroup.conf ]; do
+            echo "Waiting for cgroup.conf from controller..."
+            sleep 5
+        done
+
+        cp /shared/cgroup.conf /etc/slurm/
+        
+        # Setup Munge authentication with shared key
+        cp /shared/munge.key /etc/munge/munge.key
+    fi
 fi
 
 # Ensure proper permissions for munge key
@@ -250,3 +373,118 @@ if [ -f /etc/exports ]; then
 fi
 
 echo "Slurm Compute Node ${NODE_ID} setup completed!"
+
+# Configure VNC server for desktop sessions on compute nodes
+echo "🖥️ Configuring VNC server for desktop sessions..."
+
+# Create VNC service configuration for compute nodes
+mkdir -p /etc/tigervnc
+
+# Create a default VNC configuration that works with TigerVNC
+cat > /etc/tigervnc/vncserver-config-defaults << 'EOF'
+# TigerVNC server configuration for OnDemand desktop sessions
+session=xfce
+geometry=1024x768
+localhost=no
+alwaysshared=yes
+desktop=OnDemand Desktop
+EOF
+
+# Ensure proper permissions for VNC directories
+chmod 755 /etc/tigervnc
+
+# Create desktop session scripts directory if it doesn't exist from OnDemand
+mkdir -p /usr/share/ondemand-desktops
+
+# Create XFCE desktop script for compute nodes
+cat > /usr/share/ondemand-desktops/xfce.sh << 'EOFXFCE'
+#!/bin/bash
+
+# Remove any preconfigured monitors
+if [[ -f "${HOME}/.config/monitors.xml" ]]; then
+  mv "${HOME}/.config/monitors.xml" "${HOME}/.config/monitors.xml.bak"
+fi
+
+# Copy over default panel if doesn't exist, otherwise it will prompt the user
+PANEL_CONFIG="${HOME}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
+if [[ ! -e "${PANEL_CONFIG}" ]]; then
+  mkdir -p "$(dirname "${PANEL_CONFIG}")"
+  cp "/etc/xdg/xfce4/panel/default.xml" "${PANEL_CONFIG}" 2>/dev/null || true
+fi
+
+# Disable startup services
+xfconf-query -c xfce4-session -p /startup/ssh-agent/enabled -n -t bool -s false 2>/dev/null || true
+xfconf-query -c xfce4-session -p /startup/gpg-agent/enabled -n -t bool -s false 2>/dev/null || true
+
+# Disable useless services on autostart
+AUTOSTART="${HOME}/.config/autostart"
+rm -fr "${AUTOSTART}"    # clean up previous autostarts
+mkdir -p "${AUTOSTART}"
+for service in "pulseaudio" "rhsm-icon" "spice-vdagent" "tracker-extract" "tracker-miner-apps" "tracker-miner-user-guides" "xfce4-power-manager" "xfce-polkit"; do
+  echo -e "[Desktop Entry]\\nHidden=true" > "${AUTOSTART}/${service}.desktop"
+done
+
+# Run Xfce4 Terminal as login shell (sets proper TERM)
+TERM_CONFIG="${HOME}/.config/xfce4/terminal/terminalrc"
+if [[ ! -e "${TERM_CONFIG}" ]]; then
+  mkdir -p "$(dirname "${TERM_CONFIG}")"
+  sed 's/^ \{4\}//' > "${TERM_CONFIG}" << EOL
+    [Configuration]
+    CommandLoginShell=TRUE
+EOL
+else
+  sed -i \
+    '/^CommandLoginShell=/{h;s/=.*/=TRUE/};${x;/^$/{s//CommandLoginShell=TRUE/;H};x}' \
+    "${TERM_CONFIG}"
+fi
+
+# Launch dbus first through eval because it can conflict with a conda environment
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+  eval $(dbus-launch --sh-syntax)
+fi
+
+# Start up xfce desktop (block until user logs out of desktop)
+exec xfce4-session
+EOFXFCE
+
+# Create KDE desktop script for compute nodes  
+cat > /usr/share/ondemand-desktops/kde.sh << 'EOFKDE'
+#!/bin/bash
+
+# Disable useless services on autostart
+AUTOSTART="${HOME}/.config/autostart"
+rm -fr "${AUTOSTART}"    # clean up previous autostarts
+mkdir -p "${AUTOSTART}"
+for service in "pulseaudio" "rhsm-icon" "spice-vdagent" "tracker-extract" "tracker-miner-apps" "tracker-miner-user-guides" "xfce4-power-manager" "xfce-polkit"; do
+  echo -e "[Desktop Entry]\\nHidden=true" > "${AUTOSTART}/${service}.desktop"
+done
+
+# Check if KDE Plasma is available and use appropriate startup command
+if command -v startplasma-x11 >/dev/null 2>&1; then
+  echo "Starting KDE Plasma with startplasma-x11"
+  exec startplasma-x11
+elif command -v startkde >/dev/null 2>&1; then
+  echo "Starting KDE with startkde"  
+  exec startkde
+elif command -v plasmashell >/dev/null 2>&1; then
+  echo "Starting KDE Plasma shell directly"
+  # Set up basic KDE environment
+  export KDE_FULL_SESSION=true
+  export DESKTOP_SESSION=plasma
+  # Start D-Bus if needed
+  if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    eval $(dbus-launch --sh-syntax)
+  fi
+  # Start KDE components
+  kwin_x11 &
+  exec plasmashell
+else
+  echo "KDE Plasma not properly installed, falling back to XFCE"
+  exec /usr/share/ondemand-desktops/xfce.sh
+fi
+EOFKDE
+
+# Make desktop scripts executable
+chmod +x /usr/share/ondemand-desktops/*.sh
+
+echo "✅ VNC and desktop environment configuration completed for compute node ${NODE_ID}"

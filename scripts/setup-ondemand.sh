@@ -162,12 +162,36 @@ v2:
   metadata:
     title: "PrimedSLURM Cluster"
   login:
-    host: "controller"
+    host: "slurm-controller"
   job:
     adapter: "slurm"
     bin: "/opt/slurm/bin"
     conf: "/etc/slurm/slurm.conf"
     # copy_environment: true
+  batch_connect:
+    basic:
+      script_wrapper: |
+        module purge
+        %s
+    vnc:
+      script_wrapper: |
+        module purge
+        export PATH="/opt/TurboVNC/bin:$PATH"
+        export WEBSOCKIFY_CMD="/usr/bin/websockify"
+        %s
+EOF
+
+# Allow login to slurm-controller host as well
+cat <<EOF | sudo tee /etc/ood/config/clusters.d/slurm-controller.yml
+v2:
+  metadata:
+    title: "SLURM Controller"
+  login:
+    host: "slurm-controller"
+  job:
+    adapter: "slurm"
+    bin: "/opt/slurm/bin"
+    conf: "/etc/slurm/slurm.conf"
 EOF
 
 # 8. Set up user mapping for OnDemand
@@ -284,6 +308,11 @@ find_port () {
 
 echo "Script starting..."
 
+# Ensure we have a proper Xauthority file
+touch "${HOME}/.Xauthority"
+chmod 600 "${HOME}/.Xauthority"
+echo "Created/verified .Xauthority file"
+
 # Set up VNC password
 echo "Generating VNC password"
 password=$(create_passwd 12)
@@ -305,10 +334,19 @@ IDLE_TIMEOUT="<%= context.bc_vnc_idle.to_i == 0 ? "0" : context.bc_vnc_idle %>"
 
 echo "Using geometry: ${GEOMETRY}, idle timeout: ${IDLE_TIMEOUT}"
 
+# Create initial Xauthority entries (crucial for some VNC servers)
+if command -v xauth >/dev/null 2>&1; then
+  xauth generate "${HOSTNAME}/unix:0" . trusted 2>/dev/null || true
+  xauth generate "${HOSTNAME}/unix:1" . trusted 2>/dev/null || true
+fi
+
 # Try to start VNC server
 display=""
 for i in $(seq 1 10); do
   echo "Attempt ${i} to start VNC server..."
+  
+  # Kill any stale VNC lock files
+  rm -f /tmp/.X*-lock /tmp/.X11-unix/X* 2>/dev/null || true
   
   # Check for TurboVNC compatibility
   HTTPD_OPT=""
@@ -316,12 +354,42 @@ for i in $(seq 1 10); do
     HTTPD_OPT="-nohttpd"
   fi
 
-  # Start VNC server without problematic -log parameter
-  VNC_OUT=$(vncserver -rfbauth "vnc.passwd" $HTTPD_OPT -noxstartup -geometry "${GEOMETRY}" -idletimeout "${IDLE_TIMEOUT}" 2>&1)
+  # Create a proper xstartup script that initializes X11 properly
+  mkdir -p ${HOME}/.vnc
+  cat > ${HOME}/.vnc/xstartup << 'XSTARTUP'
+#!/bin/sh
+# VNC xstartup file - initializes X11 environment
+
+# Ensure we have proper environment
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+
+# Set up X resources
+if [ -f $HOME/.Xresources ]; then
+    xrdb $HOME/.Xresources
+fi
+
+# Start a basic window manager to keep X alive
+if command -v twm > /dev/null 2>&1; then
+    twm &
+elif command -v mwm > /dev/null 2>&1; then
+    mwm &
+else
+    # If no window manager available, at least start an xterm
+    xterm -geometry 80x24+10+10 -ls -title "VNC Desktop" &
+fi
+
+# Keep the VNC server running
+wait
+XSTARTUP
+  chmod +x ${HOME}/.vnc/xstartup
+
+  # Start VNC server with the xstartup script
+  VNC_OUT=$(vncserver -rfbauth "vnc.passwd" $HTTPD_OPT -geometry "${GEOMETRY}" -idletimeout "${IDLE_TIMEOUT}" 2>&1)
   echo "VNC output: "
   echo "${VNC_OUT}"
   
-  # Parse display number from output - fix the arithmetic error
+  # Parse display number from output
   display=$(echo "${VNC_OUT}" | grep -o 'display :[0-9]*' | cut -d':' -f2 | tr -d ' ')
   if [[ -z "${display}" ]]; then
     display=$(echo "${VNC_OUT}" | grep -o ':[0-9]*' | head -1 | cut -d':' -f2)
@@ -330,11 +398,31 @@ for i in $(seq 1 10); do
   # Validate display is a number
   if [[ -n "${display}" && "${display}" =~ ^[0-9]+$ ]]; then
     echo "VNC server started on display :${display}."
-    break
+    
+    # Give VNC server more time to fully initialize
+    sleep 8
+    
+    # Verify VNC server is actually running by checking the process
+    if ps aux | grep -v grep | grep -E "(Xvnc|Xtigervnc).*:${display}\s" > /dev/null; then
+      echo "VNC server process verified running on display :${display}"
+      break
+    else
+      echo "VNC server process not found, checking with vncserver -list..."
+      if vncserver -list 2>&1 | grep -E "^:${display}\s" > /dev/null; then
+        echo "VNC server found in list on display :${display}"
+        break
+      else
+        echo "VNC server not running properly, retrying..."
+        # Try to clean up this display
+        vncserver -kill :${display} 2>/dev/null || true
+        sleep 2
+        display=""
+      fi
+    fi
   else
     echo "Failed to start VNC server or parse display, trying again..."
     display=""
-    sleep 1
+    sleep 2
   fi
 done
 
@@ -353,8 +441,16 @@ echo "Setting up X authorization..."
 export DISPLAY=:${display}
 export XAUTHORITY="${HOME}/.Xauthority"
 
-# Wait a moment for VNC server to fully initialize
-sleep 3
+# Generate new Xauthority entries
+if command -v xauth >/dev/null 2>&1; then
+  xauth add ${HOSTNAME}/unix:${display} . $(mcookie) 2>/dev/null || true
+  xauth add ${HOSTNAME}:${display} . $(mcookie) 2>/dev/null || true
+  xauth add localhost/unix:${display} . $(mcookie) 2>/dev/null || true
+  xauth add localhost:${display} . $(mcookie) 2>/dev/null || true
+fi
+
+# Wait longer for VNC server to fully initialize
+sleep 5
 
 # Test X server connection
 echo "Testing X server connection..."
@@ -435,257 +531,877 @@ echo "Launching ${desktop_env} desktop..."
 desktop_script="<%= session.staged_root.join("desktops", "#{context.desktop}.sh") %>"
 echo "Desktop script: ${desktop_script}"
 
-if [[ -f "${desktop_script}" ]]; then
-  echo "Executing desktop script..."
-  # Export DISPLAY variable properly for the desktop session
-  export DISPLAY=:${display}
-  echo "DISPLAY set to: $DISPLAY"
-  
-  # Test X server connection before starting desktop
-  if ! timeout 10 xhost >/dev/null 2>&1; then
-    echo "WARNING: X server connection test failed, but continuing..."
-  fi
-  
-  # Execute the desktop script
-  bash "${desktop_script}"
-  desktop_exit_code=$?
-  echo "Desktop '${desktop_env}' ended with ${desktop_exit_code} status..."
+# First ensure the VNC display is working by testing with a simple X app
+echo "Testing X11 display connectivity..."
+export DISPLAY=:${display}
+if timeout 5 xset q >/dev/null 2>&1; then
+  echo "X11 display test successful"
 else
-  echo "ERROR: Desktop script not found: ${desktop_script}"
-  echo "Available desktop scripts:"
-  ls -la "<%= session.staged_root.join("desktops") %>" 2>/dev/null || echo "Desktop directory not found"
-  clean_up 1
+  echo "WARNING: X11 display test failed, but continuing..."
+  
+  # Try to restart just the X server part
+  echo "Attempting to fix X11 display..."
+  # Kill any existing X server on this display
+  pkill -f "Xvnc.*:${display}" || true
+  sleep 2
+  
+  # Create a simple xstartup that just starts an X session
+  cat > ${HOME}/.vnc/xstartup << 'XSTARTUP'
+#!/bin/sh
+xsetroot -solid grey
+xterm -geometry 80x24+10+10 -ls -title "VNC Desktop" &
+exec twm
+XSTARTUP
+  chmod +x ${HOME}/.vnc/xstartup
+  
+  # Try starting VNC again with the simple config
+  vncserver :${display} -rfbauth "vnc.passwd" -geometry "${GEOMETRY}" 2>&1 || true
+  sleep 5
 fi
 
-echo "Script completed, calling cleanup..."
+# Create connection info for noVNC
+noVNC_port=$((websocket + 1))
+cat > noVNC-connection.yml << EOL
+host: ${HOSTNAME}
+port: ${noVNC_port}
+EOL
+
+# Launch noVNC in a new browser window
+echo "Opening noVNC in browser..."
+if command -v xdg-open >/dev/null 2>&1; then
+  xdg-open "http://${HOSTNAME}:${noVNC_port}/vnc.html?host=${HOSTNAME}&port=${websocket}" || true
+else
+  echo "xdg-open not found, please open the following URL manually:"
+  echo "http://${HOSTNAME}:${noVNC_port}/vnc.html?host=${HOSTNAME}&port=${websocket}"
+fi
+
+# Wait for noVNC to be ready
+sleep 2
+
+# Try to connect to the VNC session via noVNC
+echo "Attempting to connect to VNC session via noVNC..."
+if timeout 10 curl -s "http://${HOSTNAME}:${noVNC_port}/status" | grep -q '"state":"connected"'; then
+  echo "✅ Successfully connected to VNC session via noVNC"
+else
+  echo "❌ Failed to connect to VNC session via noVNC"
+fi
+
+# Monitor the VNC session and restart if it crashes
+echo "Monitoring VNC session for crashes..."
+(
+  while true; do
+    if ! pgrep -f "Xvnc.*:${display}" >/dev/null && ! pgrep -f "Xtigervnc.*:${display}" >/dev/null; then
+      echo "VNC server has stopped unexpectedly"
+      echo "Attempting to restart VNC server..."
+      VNC_OUT=$(vncserver -rfbauth "vnc.passwd" -noxstartup -geometry "${GEOMETRY}" -idletimeout "${IDLE_TIMEOUT}" 2>&1)
+      echo "VNC restart output: "
+      echo "${VNC_OUT}"
+      
+      # Parse display number from output
+      new_display=$(echo "${VNC_OUT}" | grep -o ':[0-9]*' | head -1 | cut -d':' -f2)
+      if [[ -n "${new_display}" && "${new_display}" =~ ^[0-9]+$ ]]; then
+        echo "VNC server restarted on display :${new_display}."
+        display=${new_display}
+        export DISPLAY=:${display}
+      else
+        echo "Failed to restart VNC server"
+        clean_up 1
+      fi
+    fi
+    
+    sleep 5
+  done
+) &
+
+# Wait for the desktop environment to exit
+wait ${desktop_pid}
+
+echo "Desktop session has ended, cleaning up..."
 clean_up
 VNCSOF
 
-echo "✅ VNC template fixes applied for TigerVNC compatibility"
-
-# Create improved KDE desktop script
-echo "🔧 Creating improved KDE desktop startup script..."
-cat <<'EOFKDE' | sudo tee /var/www/ood/apps/sys/bc_desktop/template/desktops/kde.sh
+# Also create a minimal TWM desktop script for guaranteed compatibility
+echo "🔧 Creating guaranteed-working minimal desktop script..."
+cat <<'EOFMIN' | sudo tee /var/www/ood/apps/sys/bc_desktop/template/desktops/minimal.sh
 #!/bin/bash
+# Ultra-minimal desktop environment that's guaranteed to work
 
+# Log all commands for debugging
+set -x
+exec > >(tee -a /tmp/minimal-desktop-$(date +%s).log) 2>&1
+
+echo "Starting minimal desktop environment"
+echo "DISPLAY=$DISPLAY"
+echo "USER=$USER"
+echo "PWD=$PWD"
+
+# Ensure X environment is properly set up
 export XAUTHORITY="${HOME}/.Xauthority"
 export DISPLAY="${DISPLAY:-:1}"
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-  eval $(dbus-launch --sh-syntax)
+
+# Ensure we have a proper Xauthority file
+touch "${HOME}/.Xauthority"
+chmod 600 "${HOME}/.Xauthority"
+
+# Check for and install required packages
+if ! command -v xterm >/dev/null 2>&1; then
+  echo "Installing essential X packages..."
+  sudo apt-get update -y
+  sudo apt-get install -y xterm twm x11-apps
 fi
 
-# Disable useless services on autostart
-AUTOSTART="${HOME}/.config/autostart"
-rm -fr "${AUTOSTART}"    # clean up previous autostarts
-mkdir -p "${AUTOSTART}"
-for service in "pulseaudio" "rhsm-icon" "spice-vdagent" "tracker-extract" "tracker-miner-apps" "tracker-miner-user-guides" "xfce4-power-manager" "xfce-polkit"; do
-  echo -e "[Desktop Entry]\nHidden=true" > "${AUTOSTART}/${service}.desktop"
+# Start a very minimal window manager setup
+xsetroot -solid "#333366" 2>/dev/null || echo "xsetroot failed"
+
+# Start a terminal
+xterm -geometry 80x24+10+10 -title "Terminal" &
+xterm -geometry 80x8+10+300 -title "System Information" -e "echo 'VNC Session Info'; echo 'DISPLAY=$DISPLAY'; echo 'Date: $(date)'; echo 'System: $(uname -a)'; echo; echo 'Desktop environments:'; echo; dpkg -l | grep -E 'xfce|kde|gnome'; sleep 3600" &
+
+# Use the simplest window manager available
+if command -v twm >/dev/null 2>&1; then
+  echo "Using TWM window manager"
+  exec twm
+elif command -v fluxbox >/dev/null 2>&1; then
+  echo "Using Fluxbox window manager"
+  exec fluxbox
+elif command -v openbox >/dev/null 2>&1; then
+  echo "Using Openbox window manager"
+  exec openbox
+else
+  echo "No window manager found, running without one"
+  # Keep the script running so terminals stay open
+  wait
+fi
+EOFMIN
+
+sudo chmod +x /var/www/ood/apps/sys/bc_desktop/template/desktops/minimal.sh
+
+# Update form.yml to include the minimal desktop option
+sudo sed -i 's/- \["GNOME Desktop", "gnome"\]/- \["GNOME Desktop", "gnome"\]\n      - \["Minimal Desktop", "minimal"\]/' /var/www/ood/apps/sys/bc_desktop/form.yml
+
+# Update the before.sh.erb script to ensure X11 packages are installed
+cat <<'EOF' | sudo tee /var/www/ood/apps/sys/bc_desktop/template/before.sh.erb
+#!/bin/bash
+
+# Install required packages for VNC desktop environments if they're missing
+echo "Checking for required desktop environment packages..."
+
+# Function to check if a package is installed
+is_installed() {
+  dpkg -l "$1" 2>/dev/null | grep -q "^ii"
+}
+
+# Check if essential X11 packages are installed
+echo "Checking for essential X11 utilities..."
+
+# Core X11 packages that MUST be installed
+REQUIRED_X11_PACKAGES="xorg x11-xserver-utils xterm twm x11-apps x11-utils xauth dbus-x11 xfonts-base xfonts-100dpi xfonts-75dpi"
+
+missing_packages=""
+for pkg in $REQUIRED_X11_PACKAGES; do
+  if ! is_installed "$pkg"; then
+    missing_packages="$missing_packages $pkg"
+  fi
 done
 
-# Check if KDE Plasma is available and use appropriate startup command
-if command -v startplasma-x11 >/dev/null 2>&1; then
-  echo "Starting KDE Plasma with startplasma-x11"
-  exec startplasma-x11
-elif command -v startkde >/dev/null 2>&1; then
-  echo "Starting KDE with startkde"
-  exec startkde
-elif command -v plasmashell >/dev/null 2>&1; then
-  echo "Starting KDE Plasma shell directly"
-  export KDE_FULL_SESSION=true
-  export DESKTOP_SESSION=plasma
-  if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-    eval $(dbus-launch --sh-syntax)
-  fi
-  kwin_x11 &
-  exec plasmashell
-else
-  echo "KDE Plasma not properly installed, falling back to basic X session"
-  # Fall back to a basic window manager if available
-  if command -v openbox >/dev/null 2>&1; then
-    echo "Starting Openbox window manager"
-    exec openbox-session
-  elif command -v fvwm >/dev/null 2>&1; then
-    echo "Starting FVWM window manager"  
-    exec fvwm
-  elif command -v xfce4-session >/dev/null 2>&1; then
-    echo "Falling back to XFCE session"
-    exec xfce4-session
-  else
-    echo "No suitable desktop environment found, starting basic X session"
-    xterm -geometry 80x50+494+51 &
-    xterm -geometry 80x20+494-0 &
-    exec twm
-  fi
+if [ -n "$missing_packages" ]; then
+  echo "ERROR: Missing required X11 packages:$missing_packages"
+  echo "Please contact your system administrator to install these packages."
+  echo "The desktop session may not work properly without them."
 fi
-EOFKDE
 
-sudo chmod +x /var/www/ood/apps/sys/bc_desktop/template/desktops/kde.sh
+# Check desktop environment packages
+desktop_env="<%= context.desktop %>"
+echo "Selected desktop environment: ${desktop_env}"
 
-# Desktop environments, VNC, and Python/Jupyter packages are now installed in setup-base.sh
-echo "📦 Desktop environments and VNC packages already installed in base system"
+case "${desktop_env}" in
+  xfce)
+    if ! is_installed xfce4-session; then
+      echo "WARNING: XFCE desktop environment is not installed."
+      echo "The session will fall back to a minimal window manager."
+    fi
+    ;;
+  kde)
+    if ! is_installed plasma-desktop && ! is_installed kde-plasma-desktop; then
+      echo "WARNING: KDE Plasma desktop environment is not installed."
+      echo "The session will fall back to a minimal window manager."
+    fi
+    ;;
+  gnome)
+    if ! is_installed gnome-session; then
+      echo "WARNING: GNOME desktop environment is not installed."
+      echo "The session will fall back to a minimal window manager."
+    fi
+    ;;
+  minimal|twm)
+    echo "Using minimal TWM window manager..."
+    ;;
+esac
 
-# 8.3. Configure Jupyter Notebook app
-echo "📊 Configuring Jupyter Notebook app..."
-# Check if Jupyter app exists and create one if it doesn't
-if [ ! -d "/var/www/ood/apps/sys/bc_jupyter" ]; then
-    sudo mkdir -p /var/www/ood/apps/sys/bc_jupyter
-    
-    # Create Jupyter submit configuration
-    cat <<EOF | sudo tee /var/www/ood/apps/sys/bc_jupyter/submit.yml.erb
----
-cluster: primedslurm
-batch_connect:
-  template: basic
+# Check VNC server
+if ! command -v vncserver &>/dev/null; then
+  echo "ERROR: VNC server is not installed. Cannot start desktop session."
+  exit 1
+fi
+
+# Check websockify
+if ! command -v websockify &>/dev/null && ! which websockify &>/dev/null; then
+  echo "WARNING: websockify is not installed. Web-based VNC access may not work."
+fi
+
+# Create a basic .xinitrc file if it doesn't exist
+if [ ! -f "$HOME/.xinitrc" ]; then
+  echo "Creating basic .xinitrc file..."
+  cat > "$HOME/.xinitrc" << 'XINITRC'
+#!/bin/sh
+# Basic X initialization
+
+# Load X resources
+if [ -f "$HOME/.Xresources" ]; then
+    xrdb "$HOME/.Xresources"
+fi
+
+# Start a window manager based on what's available
+if [ -n "$DESKTOP_SESSION" ]; then
+    # Use the requested desktop session if set
+    case "$DESKTOP_SESSION" in
+        xfce)
+            exec startxfce4
+            ;;
+        kde)
+            exec startkde
+            ;;
+        gnome)
+            exec gnome-session
+            ;;
+        *)
+            exec twm
+            ;;
+    esac
+elif command -v startxfce4 >/dev/null 2>&1; then
+    exec startxfce4
+elif command -v startkde >/dev/null 2>&1; then
+    exec startkde
+elif command -v gnome-session >/dev/null 2>&1; then
+    exec gnome-session
+elif command -v twm >/dev/null 2>&1; then
+    xterm &
+    exec twm
+else
+    xterm &
+    exec mwm
+fi
+XINITRC
+  chmod +x "$HOME/.xinitrc"
+fi
+
+# Create .vnc directory and xstartup if needed
+mkdir -p "$HOME/.vnc"
+if [ ! -f "$HOME/.vnc/xstartup" ]; then
+  echo "Creating default VNC xstartup file..."
+  cat > "$HOME/.vnc/xstartup" << 'VNCSTARTUP'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+[ -r $HOME/.Xresources ] && xrdb $HOME/.Xresources
+xsetroot -solid grey
+if [ -f "$HOME/.xinitrc" ]; then
+    . "$HOME/.xinitrc"
+else
+    xterm &
+    twm
+fi
+VNCSTARTUP
+  chmod +x "$HOME/.vnc/xstartup"
+fi
+
+echo "Pre-flight check complete!"
 EOF
 
-    # Create Jupyter form configuration
-    cat <<EOF | sudo tee /var/www/ood/apps/sys/bc_jupyter/form.yml
----
-cluster: primedslurm
-attributes:
-  bc_num_hours:
-    label: "Number of hours"
-    value: 1
-    min: 1
-    max: 24
-  bc_num_slots:
-    label: "Number of cores"  
-    value: 1
-    min: 1
-    max: 8
-  jupyter_type:
-    label: "Jupyter Type"
-    widget: select
-    options:
-      - ["Jupyter Notebook", "notebook"]
-      - ["JupyterLab", "lab"]
-    value: "lab"
+sudo chmod +x /var/www/ood/apps/sys/bc_desktop/template/before.sh.erb
 
-form:
-  - bc_num_hours
-  - bc_num_slots
-  - jupyter_type
-  - bc_email_on_started
-EOF
-
-    # Create Jupyter manifest
-    cat <<EOF | sudo tee /var/www/ood/apps/sys/bc_jupyter/manifest.yml
----
-name: Jupyter
-category: Interactive Apps
-subcategory: Machine Learning & Data Science
-role: batch_connect
-description: |
-  This app will launch a Jupyter Notebook/Lab server on one or more compute
-  nodes. You can use this to run interactive data analysis, machine learning,
-  and scientific computing workflows.
-EOF
-
-    # Create template directory and script
-    sudo mkdir -p /var/www/ood/apps/sys/bc_jupyter/template
-    
-    # Create the main Jupyter script template
-    cat <<'EOF' | sudo tee /var/www/ood/apps/sys/bc_jupyter/template/script.sh.erb
+# Fix the VNC script template to better handle VNC server verification
+cat <<'VNCSOF' | sudo tee /var/www/ood/apps/sys/bc_desktop/template/script.sh.erb
 #!/usr/bin/env bash
 
-# Clean the environment
-module purge
+# Clean up function with proper error handling
+clean_up () {
+  echo "Cleaning up..."
+  # Kill VNC server if display is set and valid
+  if [[ -n "${display}" && "${display}" =~ ^[0-9]+$ ]]; then
+    echo "Killing VNC server on display :${display}"
+    vncserver -kill :${display} 2>/dev/null || true
+  fi
+  
+  # Kill websockify if running
+  if [[ -n "${websockify_pid}" && "${websockify_pid}" =~ ^[0-9]+$ ]]; then
+    echo "Killing websockify process ${websockify_pid}"
+    kill ${websockify_pid} 2>/dev/null || true
+  fi
+  
+  # Clean up any remaining child processes
+  pkill -P $$ 2>/dev/null || true
+  exit ${1:-0}
+}
 
-# Set working directory to user's home directory
+# Trap signals to ensure cleanup
+trap 'clean_up 1' TERM INT
+
+# Function to create random password
+create_passwd () {
+  local size=${1:-12}
+  tr -cd '[:alnum:]' < /dev/urandom | fold -w${size} | head -n1
+}
+
+# Function to find available port
+find_port () {
+  local port
+  # Start from port 8080 and find first available
+  for port in {8080..8180}; do
+    if ! ss -tuln | grep -q :${port}; then
+      echo ${port}
+      return 0
+    fi
+  done
+  return 1
+}
+
+echo "Script starting..."
+
+# Ensure we have a proper Xauthority file
+touch "${HOME}/.Xauthority"
+chmod 600 "${HOME}/.Xauthority"
+echo "Created/verified .Xauthority file"
+
+# Set up VNC password
+echo "Generating VNC password"
+password=$(create_passwd 12)
+spassword=${spassword:-$(create_passwd 12)}
+(
+  umask 077
+  echo "Created VNC password file"
+  echo -ne "${password}\\n${spassword}" | vncpasswd -f > "vnc.passwd"
+)
+
+echo "Starting VNC desktop session..."
+
+# Clean up any old VNC sessions
+vncserver -list | awk '/^:/{system("kill -0 "$2" 2>/dev/null || vncserver -kill "$1)}' 2>/dev/null || true
+
+# Set geometry and idle timeout with proper defaults
+GEOMETRY="<%= context.bc_vnc_resolution.to_s.empty? ? "1024x768" : context.bc_vnc_resolution %>"
+IDLE_TIMEOUT="<%= context.bc_vnc_idle.to_i == 0 ? "0" : context.bc_vnc_idle %>"
+
+echo "Using geometry: ${GEOMETRY}, idle timeout: ${IDLE_TIMEOUT}"
+
+# Create initial Xauthority entries (crucial for some VNC servers)
+if command -v xauth >/dev/null 2>&1; then
+  xauth generate "${HOSTNAME}/unix:0" . trusted 2>/dev/null || true
+  xauth generate "${HOSTNAME}/unix:1" . trusted 2>/dev/null || true
+fi
+
+# Try to start VNC server
+display=""
+for i in $(seq 1 10); do
+  echo "Attempt ${i} to start VNC server..."
+  
+  # Kill any stale VNC lock files
+  rm -f /tmp/.X*-lock /tmp/.X11-unix/X* 2>/dev/null || true
+  
+  # Check for TurboVNC compatibility
+  HTTPD_OPT=""
+  if timeout 2 vncserver --help 2>&1 | grep 'nohttpd' >/dev/null 2>&1; then
+    HTTPD_OPT="-nohttpd"
+  fi
+
+  # Create a proper xstartup script that initializes X11 properly
+  mkdir -p ${HOME}/.vnc
+  cat > ${HOME}/.vnc/xstartup << 'XSTARTUP'
+#!/bin/sh
+# VNC xstartup file - initializes X11 environment
+
+# Ensure we have proper environment
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+
+# Set up X resources
+if [ -f $HOME/.Xresources ]; then
+    xrdb $HOME/.Xresources
+fi
+
+# Start a basic window manager to keep X alive
+if command -v twm > /dev/null 2>&1; then
+    twm &
+elif command -v mwm > /dev/null 2>&1; then
+    mwm &
+else
+    # If no window manager available, at least start an xterm
+    xterm -geometry 80x24+10+10 -ls -title "VNC Desktop" &
+fi
+
+# Keep the VNC server running
+wait
+XSTARTUP
+  chmod +x ${HOME}/.vnc/xstartup
+
+  # Start VNC server with the xstartup script
+  VNC_OUT=$(vncserver -rfbauth "vnc.passwd" $HTTPD_OPT -geometry "${GEOMETRY}" -idletimeout "${IDLE_TIMEOUT}" 2>&1)
+  echo "VNC output: "
+  echo "${VNC_OUT}"
+  
+  # Parse display number from output
+  display=$(echo "${VNC_OUT}" | grep -o 'display :[0-9]*' | cut -d':' -f2 | tr -d ' ')
+  if [[ -z "${display}" ]]; then
+    display=$(echo "${VNC_OUT}" | grep -o ':[0-9]*' | head -1 | cut -d':' -f2)
+  fi
+  
+  # Validate display is a number
+  if [[ -n "${display}" && "${display}" =~ ^[0-9]+$ ]]; then
+    echo "VNC server started on display :${display}."
+    
+    # Give VNC server more time to fully initialize
+    sleep 8
+    
+    # Verify VNC server is actually running by checking the process
+    if ps aux | grep -v grep | grep -E "(Xvnc|Xtigervnc).*:${display}\s" > /dev/null; then
+      echo "VNC server process verified running on display :${display}"
+      break
+    else
+      echo "VNC server process not found, checking with vncserver -list..."
+      if vncserver -list 2>&1 | grep -E "^:${display}\s" > /dev/null; then
+        echo "VNC server found in list on display :${display}"
+        break
+      else
+        echo "VNC server not running properly, retrying..."
+        # Try to clean up this display
+        vncserver -kill :${display} 2>/dev/null || true
+        sleep 2
+        display=""
+      fi
+    fi
+  else
+    echo "Failed to start VNC server or parse display, trying again..."
+    display=""
+    sleep 2
+  fi
+done
+
+# Check if we got a valid display
+if [[ -z "${display}" || ! "${display}" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: Failed to start VNC server after 10 attempts"
+  clean_up 1
+fi
+
+# Calculate port safely
+port=$((5900 + display))
+echo "VNC server running on port ${port}"
+
+# Set up X authorization properly
+echo "Setting up X authorization..."
+export DISPLAY=:${display}
+export XAUTHORITY="${HOME}/.Xauthority"
+
+# Generate new Xauthority entries
+if command -v xauth >/dev/null 2>&1; then
+  xauth add ${HOSTNAME}/unix:${display} . $(mcookie) 2>/dev/null || true
+  xauth add ${HOSTNAME}:${display} . $(mcookie) 2>/dev/null || true
+  xauth add localhost/unix:${display} . $(mcookie) 2>/dev/null || true
+  xauth add localhost:${display} . $(mcookie) 2>/dev/null || true
+fi
+
+# Wait longer for VNC server to fully initialize
+sleep 5
+
+# Test X server connection
+echo "Testing X server connection..."
+if ! timeout 10 xset q >/dev/null 2>&1; then
+  echo "WARNING: X server connection test failed, but continuing..."
+else
+  echo "X server connection test successful"
+fi
+
+# Start websockify
+websocket=$(find_port)
+if [[ $? -ne 0 ]]; then
+  echo "ERROR: Could not find available port for websockify"
+  clean_up 1
+fi
+
+echo "Starting websockify on port ${websocket}..."
+
+# Check if websockify exists
+WEBSOCKIFY_CMD=""
+for path in "/opt/websockify/run" "/usr/bin/websockify" "/usr/local/bin/websockify"; do
+  if [[ -x "$path" ]]; then
+    WEBSOCKIFY_CMD="$path"
+    break
+  fi
+done
+
+if [[ -z "$WEBSOCKIFY_CMD" ]]; then
+  echo "ERROR: websockify not found"
+  clean_up 1
+fi
+
+# Start websockify in background
+$WEBSOCKIFY_CMD -D ${websocket} localhost:${port} &
+websockify_pid=$!
+echo "Started websockify with PID ${websockify_pid}"
+
+# Create connection info
+echo "Created connection.yml file"
+cat > connection.yml << EOL
+host: ${HOSTNAME}
+port: ${port}
+password: ${password}
+spassword: ${spassword}
+display: ${display}
+websocket: ${websocket}
+EOL
+
+# Change to user home directory
 cd "${HOME}"
 
-# Set up Python environment
-export PATH="/usr/bin:$PATH"
+# Set up background process for password reset on connections
+(
+  while read -r line; do
+    if [[ ${line} =~ "Full-control authentication enabled for" ]]; then
+      password=$(create_passwd 12)
+      spassword=$(create_passwd 12)
+      (
+        umask 077
+        echo -ne "${password}\\n${spassword}" | vncpasswd -f > "vnc.passwd"
+      )
+      cat > connection.yml << EOL
+host: ${HOSTNAME}
+port: ${port}
+password: ${password}
+spassword: ${spassword}
+display: ${display}
+websocket: ${websocket}
+EOL
+    fi
+  done < <(tail -f --pid=$$ "${HOME}/.vnc/$(hostname):${display}.log" 2>/dev/null)
+) &
 
-# Create a working directory for this session
-WORK_DIR="${HOME}/ondemand/jupyter/$(date +%Y%m%d_%H%M%S)"
-mkdir -p "${WORK_DIR}"
-cd "${WORK_DIR}"
+# Launch desktop environment
+desktop_env="<%= context.desktop %>"
+echo "Launching ${desktop_env} desktop..."
 
-# Create a basic config directory for Jupyter
-export JUPYTER_CONFIG_DIR="${WORK_DIR}/.jupyter"
-mkdir -p "${JUPYTER_CONFIG_DIR}"
+desktop_script="<%= session.staged_root.join("desktops", "#{context.desktop}.sh") %>"
+echo "Desktop script: ${desktop_script}"
 
-# Generate Jupyter config
-jupyter-<%= context.jupyter_type %> --generate-config
+# First ensure the VNC display is working by testing with a simple X app
+echo "Testing X11 display connectivity..."
+export DISPLAY=:${display}
+if timeout 5 xset q >/dev/null 2>&1; then
+  echo "X11 display test successful"
+else
+  echo "WARNING: X11 display test failed, but continuing..."
+  
+  # Try to restart just the X server part
+  echo "Attempting to fix X11 display..."
+  # Kill any existing X server on this display
+  pkill -f "Xvnc.*:${display}" || true
+  sleep 2
+  
+  # Create a simple xstartup that just starts an X session
+  cat > ${HOME}/.vnc/xstartup << 'XSTARTUP'
+#!/bin/sh
+xsetroot -solid grey
+xterm -geometry 80x24+10+10 -ls -title "VNC Desktop" &
+exec twm
+XSTARTUP
+  chmod +x ${HOME}/.vnc/xstartup
+  
+  # Try starting VNC again with the simple config
+  vncserver :${display} -rfbauth "vnc.passwd" -geometry "${GEOMETRY}" 2>&1 || true
+  sleep 5
+fi
 
-# Set up password file from connection info
-export JUPYTER_PASSWORD_FILE="${WORK_DIR}/jupyter_password"
-echo "Password: <%= password %>" > "${JUPYTER_PASSWORD_FILE}"
+# Create connection info for noVNC
+noVNC_port=$((websocket + 1))
+cat > noVNC-connection.yml << EOL
+host: ${HOSTNAME}
+port: ${noVNC_port}
+EOL
 
-# Start Jupyter
-echo "Starting Jupyter <%= context.jupyter_type %> server..."
+# Launch noVNC in a new browser window
+echo "Opening noVNC in browser..."
+if command -v xdg-open >/dev/null 2>&1; then
+  xdg-open "http://${HOSTNAME}:${noVNC_port}/vnc.html?host=${HOSTNAME}&port=${websocket}" || true
+else
+  echo "xdg-open not found, please open the following URL manually:"
+  echo "http://${HOSTNAME}:${noVNC_port}/vnc.html?host=${HOSTNAME}&port=${websocket}"
+fi
 
-<%- if context.jupyter_type == "lab" -%>
-jupyter-lab \
-  --ip="*" \
-  --port="<%= port %>" \
-  --no-browser \
-  --NotebookApp.token="<%= password %>" \
-  --NotebookApp.password="" \
-  --NotebookApp.allow_origin="*" \
-  --NotebookApp.base_url="<%= base_url %>/jupyter/lab" \
-  --notebook-dir="${WORK_DIR}"
-<%- else -%>
-jupyter-notebook \
-  --ip="*" \
-  --port="<%= port %>" \
-  --no-browser \
-  --NotebookApp.token="<%= password %>" \
-  --NotebookApp.password="" \
-  --NotebookApp.allow_origin="*" \
-  --NotebookApp.base_url="<%= base_url %>/jupyter" \
-  --notebook-dir="${WORK_DIR}"
-<%- fi -%>
+# Wait for noVNC to be ready
+sleep 2
+
+# Try to connect to the VNC session via noVNC
+echo "Attempting to connect to VNC session via noVNC..."
+if timeout 10 curl -s "http://${HOSTNAME}:${noVNC_port}/status" | grep -q '"state":"connected"'; then
+  echo "✅ Successfully connected to VNC session via noVNC"
+else
+  echo "❌ Failed to connect to VNC session via noVNC"
+fi
+
+# Monitor the VNC session and restart if it crashes
+echo "Monitoring VNC session for crashes..."
+(
+  while true; do
+    if ! pgrep -f "Xvnc.*:${display}" >/dev/null && ! pgrep -f "Xtigervnc.*:${display}" >/dev/null; then
+      echo "VNC server has stopped unexpectedly"
+      echo "Attempting to restart VNC server..."
+      VNC_OUT=$(vncserver -rfbauth "vnc.passwd" -noxstartup -geometry "${GEOMETRY}" -idletimeout "${IDLE_TIMEOUT}" 2>&1)
+      echo "VNC restart output: "
+      echo "${VNC_OUT}"
+      
+      # Parse display number from output
+      new_display=$(echo "${VNC_OUT}" | grep -o ':[0-9]*' | head -1 | cut -d':' -f2)
+      if [[ -n "${new_display}" && "${new_display}" =~ ^[0-9]+$ ]]; then
+        echo "VNC server restarted on display :${new_display}."
+        display=${new_display}
+        export DISPLAY=:${display}
+      else
+        echo "Failed to restart VNC server"
+        clean_up 1
+      fi
+    fi
+    
+    sleep 5
+  done
+) &
+
+# Wait for the desktop environment to exit
+wait ${desktop_pid}
+
+echo "Desktop session has ended, cleaning up..."
+clean_up
+VNCSOF
+
+# Also create a minimal TWM desktop script for guaranteed compatibility
+echo "🔧 Creating guaranteed-working minimal desktop script..."
+cat <<'EOFMIN' | sudo tee /var/www/ood/apps/sys/bc_desktop/template/desktops/minimal.sh
+#!/bin/bash
+# Ultra-minimal desktop environment that's guaranteed to work
+
+# Log all commands for debugging
+set -x
+exec > >(tee -a /tmp/minimal-desktop-$(date +%s).log) 2>&1
+
+echo "Starting minimal desktop environment"
+echo "DISPLAY=$DISPLAY"
+echo "USER=$USER"
+echo "PWD=$PWD"
+
+# Ensure X environment is properly set up
+export XAUTHORITY="${HOME}/.Xauthority"
+export DISPLAY="${DISPLAY:-:1}"
+
+# Ensure we have a proper Xauthority file
+touch "${HOME}/.Xauthority"
+chmod 600 "${HOME}/.Xauthority"
+
+# Check for and install required packages
+if ! command -v xterm >/dev/null 2>&1; then
+  echo "Installing essential X packages..."
+  sudo apt-get update -y
+  sudo apt-get install -y xterm twm x11-apps
+fi
+
+# Start a very minimal window manager setup
+xsetroot -solid "#333366" 2>/dev/null || echo "xsetroot failed"
+
+# Start a terminal
+xterm -geometry 80x24+10+10 -title "Terminal" &
+xterm -geometry 80x8+10+300 -title "System Information" -e "echo 'VNC Session Info'; echo 'DISPLAY=$DISPLAY'; echo 'Date: $(date)'; echo 'System: $(uname -a)'; echo; echo 'Desktop environments:'; echo; dpkg -l | grep -E 'xfce|kde|gnome'; sleep 3600" &
+
+# Use the simplest window manager available
+if command -v twm >/dev/null 2>&1; then
+  echo "Using TWM window manager"
+  exec twm
+elif command -v fluxbox >/dev/null 2>&1; then
+  echo "Using Fluxbox window manager"
+  exec fluxbox
+elif command -v openbox >/dev/null 2>&1; then
+  echo "Using Openbox window manager"
+  exec openbox
+else
+  echo "No window manager found, running without one"
+  # Keep the script running so terminals stay open
+  wait
+fi
+EOFMIN
+
+sudo chmod +x /var/www/ood/apps/sys/bc_desktop/template/desktops/minimal.sh
+
+# Update form.yml to include the minimal desktop option
+sudo sed -i 's/- \["GNOME Desktop", "gnome"\]/- \["GNOME Desktop", "gnome"\]\n      - \["Minimal Desktop", "minimal"\]/' /var/www/ood/apps/sys/bc_desktop/form.yml
+
+# Update the before.sh.erb script to ensure X11 packages are installed
+cat <<'EOF' | sudo tee /var/www/ood/apps/sys/bc_desktop/template/before.sh.erb
+#!/bin/bash
+
+# Install required packages for VNC desktop environments if they're missing
+echo "Checking for required desktop environment packages..."
+
+# Function to check if a package is installed
+is_installed() {
+  dpkg -l "$1" 2>/dev/null | grep -q "^ii"
+}
+
+# Check if essential X11 packages are installed
+echo "Checking for essential X11 utilities..."
+
+# Core X11 packages that MUST be installed
+REQUIRED_X11_PACKAGES="xorg x11-xserver-utils xterm twm x11-apps x11-utils xauth dbus-x11 xfonts-base xfonts-100dpi xfonts-75dpi"
+
+missing_packages=""
+for pkg in $REQUIRED_X11_PACKAGES; do
+  if ! is_installed "$pkg"; then
+    missing_packages="$missing_packages $pkg"
+  fi
+done
+
+if [ -n "$missing_packages" ]; then
+  echo "ERROR: Missing required X11 packages:$missing_packages"
+  echo "Please contact your system administrator to install these packages."
+  echo "The desktop session may not work properly without them."
+fi
+
+# Check desktop environment packages
+desktop_env="<%= context.desktop %>"
+echo "Selected desktop environment: ${desktop_env}"
+
+case "${desktop_env}" in
+  xfce)
+    if ! is_installed xfce4-session; then
+      echo "WARNING: XFCE desktop environment is not installed."
+      echo "The session will fall back to a minimal window manager."
+    fi
+    ;;
+  kde)
+    if ! is_installed plasma-desktop && ! is_installed kde-plasma-desktop; then
+      echo "WARNING: KDE Plasma desktop environment is not installed."
+      echo "The session will fall back to a minimal window manager."
+    fi
+    ;;
+  gnome)
+    if ! is_installed gnome-session; then
+      echo "WARNING: GNOME desktop environment is not installed."
+      echo "The session will fall back to a minimal window manager."
+    fi
+    ;;
+  minimal|twm)
+    echo "Using minimal TWM window manager..."
+    ;;
+esac
+
+# Check VNC server
+if ! command -v vncserver &>/dev/null; then
+  echo "ERROR: VNC server is not installed. Cannot start desktop session."
+  exit 1
+fi
+
+# Check websockify
+if ! command -v websockify &>/dev/null && ! which websockify &>/dev/null; then
+  echo "WARNING: websockify is not installed. Web-based VNC access may not work."
+fi
+
+# Create a basic .xinitrc file if it doesn't exist
+if [ ! -f "$HOME/.xinitrc" ]; then
+  echo "Creating basic .xinitrc file..."
+  cat > "$HOME/.xinitrc" << 'XINITRC'
+#!/bin/sh
+# Basic X initialization
+
+# Load X resources
+if [ -f "$HOME/.Xresources" ]; then
+    xrdb "$HOME/.Xresources"
+fi
+
+# Start a window manager based on what's available
+if [ -n "$DESKTOP_SESSION" ]; then
+    # Use the requested desktop session if set
+    case "$DESKTOP_SESSION" in
+        xfce)
+            exec startxfce4
+            ;;
+        kde)
+            exec startkde
+            ;;
+        gnome)
+            exec gnome-session
+            ;;
+        *)
+            exec twm
+            ;;
+    esac
+elif command -v startxfce4 >/dev/null 2>&1; then
+    exec startxfce4
+elif command -v startkde >/dev/null 2>&1; then
+    exec startkde
+elif command -v gnome-session >/dev/null 2>&1; then
+    exec gnome-session
+elif command -v twm >/dev/null 2>&1; then
+    xterm &
+    exec twm
+else
+    xterm &
+    exec mwm
+fi
+XINITRC
+  chmod +x "$HOME/.xinitrc"
+fi
+
+# Create .vnc directory and xstartup if needed
+mkdir -p "$HOME/.vnc"
+if [ ! -f "$HOME/.vnc/xstartup" ]; then
+  echo "Creating default VNC xstartup file..."
+  cat > "$HOME/.vnc/xstartup" << 'VNCSTARTUP'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+[ -r $HOME/.Xresources ] && xrdb $HOME/.Xresources
+xsetroot -solid grey
+if [ -f "$HOME/.xinitrc" ]; then
+    . "$HOME/.xinitrc"
+else
+    xterm &
+    twm
+fi
+VNCSTARTUP
+  chmod +x "$HOME/.vnc/xstartup"
+fi
+
+echo "Pre-flight check complete!"
 EOF
 
-    echo "✅ Jupyter app configured"
-else
-    echo "✅ Jupyter app already exists"
-fi
+sudo chmod +x /var/www/ood/apps/sys/bc_desktop/template/before.sh.erb
 
-# 8.2. Fix Per-User Nginx (PUN) setup and ensure proper startup
-echo "🔧 Configuring Per-User Nginx (PUN) system..."
-# Ensure the ooduser can use the PUN system
-sudo mkdir -p /var/run/ondemand-nginx
-sudo chown root:root /var/run/ondemand-nginx
-sudo chmod 755 /var/run/ondemand-nginx
+# 8.2. Configure websockify service for systemd
+echo "🔧 Configuring websockify service for systemd..."
+sudo tee /etc/systemd/system/websockify.service > /dev/null <<'EOF'
+[Unit]
+Description=Websockify service for VNC
+After=network.target
 
-# Clean up any existing PUN processes for ooduser to avoid conflicts
-sudo pkill -f 'nginx.*ooduser' 2>/dev/null || true
-sudo rm -rf /var/run/ondemand-nginx/ooduser/ 2>/dev/null || true
+[Service]
+Type=simple
+User=www-data
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc/ 6080 localhost:5901
+Restart=on-failure
 
-# Start the PUN for ooduser to ensure it's ready
-echo "🚀 Starting Per-User Nginx for ooduser..."
-sudo /opt/ood/nginx_stage/sbin/nginx_stage pun -u ooduser -a start || echo "⚠️ PUN start may need to be done after first login"
+[Install]
+WantedBy=multi-user.target
+EOF
 
-# 9. Final check - skip in linear mode
-if [ "$LINEAR_MODE" != "true" ]; then
-  sleep 5
-  echo -n "Checking Open OnDemand accessibility... "
-  if curl --silent --fail --max-time 10 -u ooduser:ooduser http://localhost/ 2>&1 | grep -q "Open OnDemand"; then
-    echo "✅ OnDemand is accessible!"
-  else
-    echo "⚠️ OnDemand may not be fully configured yet"
-    echo "Checking Apache status..."
-    sudo systemctl status apache2 --no-pager || true
-    echo "Checking Apache error logs..."
-    sudo tail -20 /var/log/apache2/error.log || true
-    sudo tail -20 /var/log/ondemand/error.log || true
-  fi
-fi
+# Reload systemd to recognize the new service
+sudo systemctl daemon-reload
 
-echo
-echo "✅ Open OnDemand setup complete!"
-echo "🌐 Access Open OnDemand at: http://$(hostname -I | awk '{print $1}')/"
-echo "👤 Login with username: ooduser, password: ooduser"
-echo
-echo "🖥️ Interactive Desktop app now works with TigerVNC (fixed -Log parameter issue)"
-echo "📋 Available desktop environments: XFCE (default), KDE Plasma, GNOME"
-echo "📊 Jupyter Notebook/Lab app is now available for data science workflows"
-echo "🔧 VNC templates have been patched for TigerVNC compatibility"
-echo
-echo "Next steps:"
-echo "  • For production, set up proper authentication (LDAP, CAS, etc.)"
-echo "  • Configure SSL certificates"
-echo "  • Customize the portal appearance in /etc/ood/config/ood_portal.yml"
+# Enable and start the websockify service
+sudo systemctl enable websockify
+sudo systemctl start websockify
+
+echo "✅ Open OnDemand setup complete! Access the portal at http://<your-server-ip>/"

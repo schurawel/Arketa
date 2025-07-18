@@ -392,6 +392,13 @@ q-cluster: setup-repos ## 🚀 Build and start QEMU-based Slurm cluster
 	@echo "  Node2: ssh ubuntu@192.168.7.12"
 	@echo "  Password: ubuntu"
 
+q-cluster-rebuild-controller: ## 🔄 Rebuild only the controller VM, preserving compute nodes
+	@echo "$(BLUE)[INFO]$(NC) Rebuilding QEMU cluster controller VM..."
+	@chmod +x ./qemu-cluster-build.sh
+	@./qemu-cluster-build.sh rebuild-controller
+	@echo "$(GREEN)[SUCCESS]$(NC) Controller VM has been rebuilt!"
+	@echo "$(BLUE)[INFO]$(NC) You may need to update compute node configurations if you made Slurm config changes."
+
 q-cluster-start: ## ▶️ Start existing QEMU cluster VMs
 	@echo "$(BLUE)[INFO]$(NC) Starting QEMU cluster VMs..."
 	@chmod +x ./qemu-cluster-build.sh

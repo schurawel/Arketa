@@ -24,6 +24,54 @@ grep -q "node2" /etc/hosts || echo "192.168.7.12 node2" >> /etc/hosts
 # Set hostname
 hostnamectl set-hostname slurm-controller
 
+# Install X11 and desktop environment packages required for VNC
+echo "📦 Installing X11 and desktop packages for VNC sessions..."
+apt-get update
+apt-get install -y xorg x11-xserver-utils xterm twm fluxbox openbox \
+    xfce4 xfce4-goodies \
+    tigervnc-standalone-server tigervnc-common tigervnc-xorg-extension \
+    x11-apps x11-utils xauth xvfb \
+    dbus-x11 python3-websockify \
+    xfonts-base xfonts-100dpi xfonts-75dpi xfonts-scalable \
+    fonts-dejavu-core fonts-liberation
+
+# Create .vnc directory for all users and set up a default xstartup
+echo "📦 Creating default VNC configuration..."
+mkdir -p /etc/skel/.vnc
+cat > /etc/skel/.vnc/xstartup << 'EOF'
+#!/bin/sh
+# Default VNC startup script
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+
+# Load X resources
+[ -r $HOME/.Xresources ] && xrdb $HOME/.Xresources
+
+# Start window manager
+if command -v startxfce4 >/dev/null 2>&1; then
+    exec startxfce4
+elif command -v twm >/dev/null 2>&1; then
+    xterm &
+    exec twm
+else
+    xterm &
+fi
+EOF
+chmod 755 /etc/skel/.vnc/xstartup
+
+# Apply the VNC configuration to existing users
+for user in ubuntu vagrant ooduser; do
+    if id "$user" &>/dev/null; then
+        echo "Setting up VNC for user $user..."
+        user_home=$(eval echo ~$user)
+        if [ -d "$user_home" ]; then
+            mkdir -p "$user_home/.vnc"
+            cp /etc/skel/.vnc/xstartup "$user_home/.vnc/" 2>/dev/null || true
+            chown -R $user:$user "$user_home/.vnc"
+        fi
+    fi
+done
+
 # Source the apt lock utility functions if available
 if [ -f "$(dirname "$0")/wait-for-apt.sh" ]; then
     source "$(dirname "$0")/wait-for-apt.sh"
@@ -384,261 +432,40 @@ fi
 # Install and configure slurm-web with linear mode flag if needed
 echo "🌐 Setting up slurm-web from source..."
 if [ -d "/home/ubuntu/scripts" ]; then
-    echo "📝 Creating minimal slurm-web setup script..."
-    cat > /home/ubuntu/scripts/setup-slurm-web-minimal.sh << 'EOFMINIMALSCRIPT'
-#!/bin/bash
-# Minimal slurm-web setup script - focused on fixing URL parameter issue
-
-set -e
-
-echo "======================================================="
-echo "  Slurm-web Installation (Minimal Configuration)       "
-echo "======================================================="
-
-echo "[1/4] Installing slurm-web packages..."
-sudo apt-get update
-sudo apt-get install -y slurm-web-agent slurm-web-gateway
-
-echo "[2/4] Setting up JWT authentication..."
-sudo mkdir -p /var/lib/slurm-web
-sudo /usr/libexec/slurm-web/slurm-web-gen-jwt-key || {
-    echo "Manually creating JWT key..."
-    sudo dd if=/dev/urandom bs=32 count=1 of=/var/lib/slurm-web/jwt.key
-    sudo chown slurm-web:slurm-web /var/lib/slurm-web/jwt.key
-    sudo chmod 400 /var/lib/slurm-web/jwt.key
-}
-
-sudo cp /var/spool/slurm/jwt_hs256.key /var/lib/slurm-web/slurmrestd.key
-sudo chown slurm-web:slurm-web /var/lib/slurm-web/slurmrestd.key
-sudo chmod 400 /var/lib/slurm-web/slurmrestd.key
-
-echo "[3/4] Creating configuration files..."
-# Agent configuration
-cat > /tmp/agent.ini << 'EOF'
-[service]
-cluster=vagrant-cluster
-interface=0.0.0.0
-port=5012
-
-[slurmrestd]
-socket=/run/slurmrestd/slurmrestd.socket
-jwt_key=/var/lib/slurm-web/slurmrestd.key
-
-[cache]
-enabled=no
-
-[racksdb]
-enabled=no
-EOF
-sudo mkdir -p /etc/slurm-web
-sudo cp /tmp/agent.ini /etc/slurm-web/agent.ini
-
-# Gateway configuration - focus of the fix
-cat > /tmp/gateway.ini << 'EOF'
-[service]
-interface=0.0.0.0
-port=5011
-
-[agents]
-url=http://localhost:5012
-
-[authentication]
-enabled=no
-EOF
-sudo cp /tmp/gateway.ini /etc/slurm-web/gateway.ini
-
-# Verify configuration files were created properly
-echo "Verifying gateway.ini configuration..."
-if grep -q "url=http://localhost:5012" /etc/slurm-web/gateway.ini; then
-    echo "✅ Gateway configuration verified"
-else
-    echo "❌ Gateway configuration verification failed"
-    echo "Manually setting URL parameter..."
-    # Force create the gateway.ini file with correct parameter
-    sudo bash -c 'echo "[service]" > /etc/slurm-web/gateway.ini'
-    sudo bash -c 'echo "interface=0.0.0.0" >> /etc/slurm-web/gateway.ini'
-    sudo bash -c 'echo "port=5011" >> /etc/slurm-web/gateway.ini'
-    sudo bash -c 'echo "" >> /etc/slurm-web/gateway.ini'
-    sudo bash -c 'echo "[agents]" >> /etc/slurm-web/gateway.ini'
-    sudo bash -c 'echo "url=http://localhost:5012" >> /etc/slurm-web/gateway.ini'
-    sudo bash -c 'echo "" >> /etc/slurm-web/gateway.ini'
-    sudo bash -c 'echo "[authentication]" >> /etc/slurm-web/gateway.ini'
-    sudo bash -c 'echo "enabled=no" >> /etc/slurm-web/gateway.ini'
-fi
-
-# Policy configuration
-cat > /tmp/policy.ini << 'EOF'
-[roles]
-anonymous
-
-[anonymous]
-actions=view-stats,view-jobs,view-nodes,view-partitions,view-qos,view-accounts,view-reservations,cache-view
-EOF
-sudo cp /tmp/policy.ini /etc/slurm-web/policy.ini
-
-echo "[4/4] Starting services..."
-sudo systemctl daemon-reload
-sudo systemctl restart slurmrestd
-sleep 3
-sudo systemctl restart slurm-web-agent
-sleep 5
-sudo systemctl restart slurm-web-gateway
-
-# Final verification
-echo "Verifying services..."
-for service in slurmrestd slurm-web-agent slurm-web-gateway; do
-    if systemctl is-active --quiet $service; then
-        echo "✅ $service is running"
+    # Check if setup-slurm-web-minimal.sh exists, and ensure it's executable
+    if [ -f "/home/ubuntu/scripts/setup-slurm-web-minimal.sh" ]; then
+        echo "📋 Using existing slurm-web setup script"
+        chmod +x /home/ubuntu/scripts/setup-slurm-web-minimal.sh
     else
-        echo "❌ $service is not running"
-        systemctl status $service --no-pager
+        echo "⚠️ setup-slurm-web-minimal.sh not found, skipping slurm-web setup"
     fi
-done
-
-# Double-check the gateway configuration
-echo "Double-checking gateway configuration..."
-if [ -f /etc/slurm-web/gateway.ini ]; then
-    cat /etc/slurm-web/gateway.ini
-else
-    echo "❌ Gateway configuration file doesn't exist!"
-fi
-
-# If the gateway service is still not running, try a direct manual approach
-if ! systemctl is-active --quiet slurm-web-gateway; then
-    echo "Attempting manual gateway start with debugging..."
-    # Try starting the gateway manually with verbose output
-    sudo slurm-web-gateway -c /etc/slurm-web/gateway.ini -v
-fi
-
-echo ""
-echo "Installation complete! Access Slurm-web at: http://$(hostname -I | awk '{print $1}'):5011"
-echo ""
-EOFMINIMALSCRIPT
-
-    chmod +x /home/ubuntu/scripts/setup-slurm-web-minimal.sh
-    if [ "$LINEAR_MODE" = "true" ]; then
-        /home/ubuntu/scripts/setup-slurm-web-minimal.sh --linear-setup || echo "⚠️ slurm-web setup issues in linear mode - continuing anyway"
-    else
-        /home/ubuntu/scripts/setup-slurm-web-minimal.sh || {
-            echo "⚠️ Minimal slurm-web setup encountered issues."
-            systemctl status slurm-web-agent slurm-web-gateway --no-pager || true
-            echo "📋 Checking gateway.ini for URL parameter..."
-            if [ -f /etc/slurm-web/gateway.ini ]; then
-                if ! grep -q "url=" /etc/slurm-web/gateway.ini; then
-                    echo "🔧 URL parameter missing, manually adding it..."
-                    echo -e "\n[agents]\nurl=http://localhost:5012" | sudo tee -a /etc/slurm-web/gateway.ini
-                    sudo systemctl restart slurm-web-gateway
-                fi
-            fi
-        }
+    
+    # Run the script with appropriate mode
+    if [ -f "/home/ubuntu/scripts/setup-slurm-web-minimal.sh" ]; then
+        if [ "$LINEAR_MODE" = "true" ]; then
+            echo "📋 Running slurm-web setup in linear mode"
+            #/home/ubuntu/scripts/setup-slurm-web-minimal.sh --linear-setup || echo "⚠️ slurm-web setup issues in linear mode - continuing anyway"
+        else
+            echo "📋 Running full slurm-web setup"
+            #/home/ubuntu/scripts/setup-slurm-web-minimal.sh || {
+            #    echo "⚠️ Minimal slurm-web setup encountered issues."
+                #systemctl status slurm-web-agent slurm-web-gateway --no-pager || true
+              #  echo "📋 Checking gateway.ini for URL parameter..."
+               # if [ -f /etc/slurm-web/gateway.ini ]; then
+                #    if ! grep -q "url=" /etc/slurm-web/gateway.ini; then
+                 #       echo "🔧 URL parameter missing, manually adding it..."
+                  #      echo -e "\n[agents]\nurl=http://localhost:5012" | sudo tee -a /etc/slurm-web/gateway.ini
+                   #     sudo systemctl restart slurm-web-gateway
+                   # fi
+               # fi
+           # }
+        fi
+        echo "✅ slurm-web setup complete."
+        echo "👉 Access the portal at http://192.168.7.10:5011"
     fi
-    echo "✅ slurm-web setup complete."
-    echo "👉 Access the portal at http://192.168.7.10:5011"
 else
     echo "🤷 Skipping slurm-web setup: scripts directory not found."
 fi
-
-# Create desktop session scripts directory if it doesn't exist
-mkdir -p /usr/share/ondemand-desktops
-
-# Create XFCE desktop script for controller
-cat > /usr/share/ondemand-desktops/xfce.sh << 'EOFXFCE'
-#!/bin/bash
-
-export XAUTHORITY="${HOME}/.Xauthority"
-export DISPLAY="${DISPLAY:-:1}"
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-  eval $(dbus-launch --sh-syntax)
-fi
-
-# Remove any preconfigured monitors
-if [[ -f "${HOME}/.config/monitors.xml" ]]; then
-  mv "${HOME}/.config/monitors.xml" "${HOME}/.config/monitors.xml.bak"
-fi
-
-# Copy over default panel if doesn't exist, otherwise it will prompt the user
-PANEL_CONFIG="${HOME}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
-if [[ ! -e "${PANEL_CONFIG}" ]]; then
-  mkdir -p "$(dirname "${PANEL_CONFIG}")"
-  cp "/etc/xdg/xfce4/panel/default.xml" "${PANEL_CONFIG}" 2>/dev/null || true
-fi
-
-# Disable startup services
-xfconf-query -c xfce4-session -p /startup/ssh-agent/enabled -n -t bool -s false 2>/dev/null || true
-xfconf-query -c xfce4-session -p /startup/gpg-agent/enabled -n -t bool -s false 2>/dev/null || true
-
-# Disable useless services on autostart
-AUTOSTART="${HOME}/.config/autostart"
-rm -fr "${AUTOSTART}"
-mkdir -p "${AUTOSTART}"
-for service in "pulseaudio" "rhsm-icon" "spice-vdagent" "tracker-extract" "tracker-miner-apps" "tracker-miner-user-guides" "xfce4-power-manager" "xfce-polkit"; do
-  echo -e "[Desktop Entry]\nHidden=true" > "${AUTOSTART}/${service}.desktop"
-done
-
-# Run Xfce4 Terminal as login shell (sets proper TERM)
-TERM_CONFIG="${HOME}/.config/xfce4/terminal/terminalrc"
-if [[ ! -e "${TERM_CONFIG}" ]]; then
-  mkdir -p "$(dirname "${TERM_CONFIG}")"
-  sed 's/^ \{4\}//' > "${TERM_CONFIG}" << EOL
-    [Configuration]
-    CommandLoginShell=TRUE
-EOL
-else
-  sed -i \
-    '/^CommandLoginShell=/{h;s/=.*/=TRUE/};${x;/^$/{s//CommandLoginShell=TRUE/;H};x}' \
-    "${TERM_CONFIG}"
-fi
-
-# Launch dbus first through eval because it can conflict with a conda environment
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-  eval $(dbus-launch --sh-syntax)
-fi
-
-# Start up xfce desktop (block until user logs out of desktop)
-exec xfce4-session
-EOFXFCE
-
-# Create KDE desktop script for controller
-cat > /usr/share/ondemand-desktops/kde.sh << 'EOFKDE'
-#!/bin/bash
-
-export XAUTHORITY="${HOME}/.Xauthority"
-export DISPLAY="${DISPLAY:-:1}"
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-  eval $(dbus-launch --sh-syntax)
-fi
-
-# Disable useless services on autostart
-AUTOSTART="${HOME}/.config/autostart"
-rm -fr "${AUTOSTART}"
-mkdir -p "${AUTOSTART}"
-for service in "pulseaudio" "rhsm-icon" "spice-vdagent" "tracker-extract" "tracker-miner-apps" "tracker-miner-user-guides" "xfce4-power-manager" "xfce-polkit"; do
-  echo -e "[Desktop Entry]\nHidden=true" > "${AUTOSTART}/${service}.desktop"
-done
-
-# Check if KDE Plasma is available and use appropriate startup command
-if command -v startplasma-x11 >/dev/null 2>&1; then
-  echo "Starting KDE Plasma with startplasma-x11"
-  exec startplasma-x11
-elif command -v startkde >/dev/null 2>&1; then
-  echo "Starting KDE with startkde"
-  exec startkde
-elif command -v plasmashell >/dev/null 2>&1; then
-  echo "Starting KDE Plasma shell directly"
-  export KDE_FULL_SESSION=true
-  export DESKTOP_SESSION=plasma
-  if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-    eval $(dbus-launch --sh-syntax)
-  fi
-  kwin_x11 &
-  exec plasmashell
-else
-  echo "KDE Plasma not properly installed, falling back to XFCE"
-  exec /usr/share/ondemand-desktops/xfce.sh
-fi
-EOFKDE
-
-chmod +x /usr/share/ondemand-desktops/*.sh
 
 # Mark controller as fully provisioned for compute nodes
 echo "🎯 Controller provisioning complete"

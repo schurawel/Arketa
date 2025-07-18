@@ -40,6 +40,54 @@ grep -q "node2" /etc/hosts || echo "192.168.7.12 node2" >> /etc/hosts
 # Set hostname
 hostnamectl set-hostname node${NODE_ID}
 
+# Install X11 and desktop environment packages required for VNC
+echo "📦 Installing X11 and desktop packages for VNC sessions..."
+apt-get update
+apt-get install -y xorg x11-xserver-utils xterm twm fluxbox openbox \
+    xfce4 xfce4-goodies \
+    tigervnc-standalone-server tigervnc-common tigervnc-xorg-extension \
+    x11-apps x11-utils xauth xvfb \
+    dbus-x11 python3-websockify \
+    xfonts-base xfonts-100dpi xfonts-75dpi xfonts-scalable \
+    fonts-dejavu-core fonts-liberation
+
+# Create .vnc directory for all users and set up a default xstartup
+echo "📦 Creating default VNC configuration..."
+mkdir -p /etc/skel/.vnc
+cat > /etc/skel/.vnc/xstartup << 'EOF'
+#!/bin/sh
+# Default VNC startup script
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+
+# Load X resources
+[ -r $HOME/.Xresources ] && xrdb $HOME/.Xresources
+
+# Start window manager
+if command -v startxfce4 >/dev/null 2>&1; then
+    exec startxfce4
+elif command -v twm >/dev/null 2>&1; then
+    xterm &
+    exec twm
+else
+    xterm &
+fi
+EOF
+chmod 755 /etc/skel/.vnc/xstartup
+
+# Apply the VNC configuration to existing users
+for user in ubuntu vagrant ooduser; do
+    if id "$user" &>/dev/null; then
+        echo "Setting up VNC for user $user..."
+        user_home=$(eval echo ~$user)
+        if [ -d "$user_home" ]; then
+            mkdir -p "$user_home/.vnc"
+            cp /etc/skel/.vnc/xstartup "$user_home/.vnc/" 2>/dev/null || true
+            chown -R $user:$user "$user_home/.vnc"
+        fi
+    fi
+done
+
 # Install NFS client and setup shared directory (moved from Vagrantfile)
 echo "Installing NFS client and setting up shared directory..."
 apt-get update
@@ -374,129 +422,8 @@ fi
 
 echo "Slurm Compute Node ${NODE_ID} setup completed!"
 
-# Configure VNC server for desktop sessions on compute nodes
-echo "🖥️ Configuring VNC server for desktop sessions..."
-
-# Create VNC service configuration for compute nodes
-mkdir -p /etc/tigervnc
-
-# Create a default VNC configuration that works with TigerVNC
-cat > /etc/tigervnc/vncserver-config-defaults << 'EOF'
-# TigerVNC server configuration for OnDemand desktop sessions
-session=xfce
-geometry=1024x768
-localhost=no
-alwaysshared=yes
-desktop=OnDemand Desktop
-EOF
-
-# Ensure proper permissions for VNC directories
-chmod 755 /etc/tigervnc
-
-# Create desktop session scripts directory if it doesn't exist from OnDemand
-mkdir -p /usr/share/ondemand-desktops
-
-# Create XFCE desktop script for compute nodes
-cat > /usr/share/ondemand-desktops/xfce.sh << 'EOFXFCE'
-#!/bin/bash
-
-export XAUTHORITY="${HOME}/.Xauthority"
-export DISPLAY="${DISPLAY:-:1}"
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-  eval $(dbus-launch --sh-syntax)
-fi
-
-# Remove any preconfigured monitors
-if [[ -f "${HOME}/.config/monitors.xml" ]]; then
-  mv "${HOME}/.config/monitors.xml" "${HOME}/.config/monitors.xml.bak"
-fi
-
-# Copy over default panel if doesn't exist, otherwise it will prompt the user
-PANEL_CONFIG="${HOME}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
-if [[ ! -e "${PANEL_CONFIG}" ]]; then
-  mkdir -p "$(dirname "${PANEL_CONFIG}")"
-  cp "/etc/xdg/xfce4/panel/default.xml" "${PANEL_CONFIG}" 2>/dev/null || true
-fi
-
-# Disable startup services
-xfconf-query -c xfce4-session -p /startup/ssh-agent/enabled -n -t bool -s false 2>/dev/null || true
-xfconf-query -c xfce4-session -p /startup/gpg-agent/enabled -n -t bool -s false 2>/dev/null || true
-
-# Disable useless services on autostart
-AUTOSTART="${HOME}/.config/autostart"
-rm -fr "${AUTOSTART}"    # clean up previous autostarts
-mkdir -p "${AUTOSTART}"
-for service in "pulseaudio" "rhsm-icon" "spice-vdagent" "tracker-extract" "tracker-miner-apps" "tracker-miner-user-guides" "xfce4-power-manager" "xfce-polkit"; do
-  echo -e "[Desktop Entry]\\nHidden=true" > "${AUTOSTART}/${service}.desktop"
-done
-
-# Run Xfce4 Terminal as login shell (sets proper TERM)
-TERM_CONFIG="${HOME}/.config/xfce4/terminal/terminalrc"
-if [[ ! -e "${TERM_CONFIG}" ]]; then
-  mkdir -p "$(dirname "${TERM_CONFIG}")"
-  sed 's/^ \{4\}//' > "${TERM_CONFIG}" << EOL
-    [Configuration]
-    CommandLoginShell=TRUE
-EOL
-else
-  sed -i \
-    '/^CommandLoginShell=/{h;s/=.*/=TRUE/};${x;/^$/{s//CommandLoginShell=TRUE/;H};x}' \
-    "${TERM_CONFIG}"
-fi
-
-# Launch dbus first through eval because it can conflict with a conda environment
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-  eval $(dbus-launch --sh-syntax)
-fi
-
-# Start up xfce desktop (block until user logs out of desktop)
-exec xfce4-session
-EOFXFCE
-
-# Create KDE desktop script for compute nodes  
-cat > /usr/share/ondemand-desktops/kde.sh << 'EOFKDE'
-#!/bin/bash
-
-export XAUTHORITY="${HOME}/.Xauthority"
-export DISPLAY="${DISPLAY:-:1}"
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-  eval $(dbus-launch --sh-syntax)
-fi
-
-# Disable useless services on autostart
-AUTOSTART="${HOME}/.config/autostart"
-rm -fr "${AUTOSTART}"    # clean up previous autostarts
-mkdir -p "${AUTOSTART}"
-for service in "pulseaudio" "rhsm-icon" "spice-vdagent" "tracker-extract" "tracker-miner-apps" "tracker-miner-user-guides" "xfce4-power-manager" "xfce-polkit"; do
-  echo -e "[Desktop Entry]\\nHidden=true" > "${AUTOSTART}/${service}.desktop"
-done
-
-# Check if KDE Plasma is available and use appropriate startup command
-if command -v startplasma-x11 >/dev/null 2>&1; then
-  echo "Starting KDE Plasma with startplasma-x11"
-  exec startplasma-x11
-elif command -v startkde >/dev/null 2>&1; then
-  echo "Starting KDE with startkde"  
-  exec startkde
-elif command -v plasmashell >/dev/null 2>&1; then
-  echo "Starting KDE Plasma shell directly"
-  # Set up basic KDE environment
-  export KDE_FULL_SESSION=true
-  export DESKTOP_SESSION=plasma
-  # Start D-Bus if needed
-  if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-    eval $(dbus-launch --sh-syntax)
-  fi
-  # Start KDE components
-  kwin_x11 &
-  exec plasmashell
-else
-  echo "KDE Plasma not properly installed, falling back to XFCE"
-  exec /usr/share/ondemand-desktops/xfce.sh
-fi
-EOFKDE
-
-# Make desktop scripts executable
-chmod +x /usr/share/ondemand-desktops/*.sh
+# Desktop environments and VNC are configured via OnDemand on the controller
+echo "📦 Desktop environment packages installed in base system"
+echo "🖥️ VNC server configurations managed by OnDemand desktop app"
 
 echo "✅ VNC and desktop environment configuration completed for compute node ${NODE_ID}"

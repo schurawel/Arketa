@@ -1619,6 +1619,56 @@ create_shared_munge_key() {
     fi
 }
 
+# Function to rebuild only the controller VM
+rebuild_controller() {
+    echo -e "${BLUE}=== Rebuilding Controller VM Only ===${NC}"
+    
+    # Stop the controller VM if it's running
+    echo -e "${YELLOW}Stopping controller VM if running...${NC}"
+    pkill -f "qemu.*slurm-controller" || true
+    
+    # Check if base image exists
+    if ! check_image "$BASE_VM_IMAGE"; then
+        echo -e "${RED}Error: Base VM image not found at $BASE_VM_IMAGE.${NC}"
+        echo -e "${YELLOW}Please run the build-base command first.${NC}"
+        exit 1
+    fi
+    
+    # Ask user if they want to recreate the controller image or just restart
+    echo -e "${YELLOW}Do you want to recreate the controller image from base (y) or just restart with current image (n)?${NC}"
+    read -p "Recreate image? (y/n): " recreate
+    
+    if [[ "$recreate" =~ ^[Yy]$ ]]; then
+        echo -e "${BLUE}Recreating controller VM image from base...${NC}"
+        # Remove old controller image
+        rm -f "$CONTROLLER_IMAGE"
+        
+        # Create new controller image
+        create_controller
+    else
+        echo -e "${BLUE}Using existing controller image...${NC}"
+        if ! check_image "$CONTROLLER_IMAGE"; then
+            echo -e "${RED}Error: Controller VM image not found. Creating it...${NC}"
+            create_controller
+        fi
+    fi
+    
+    # Ensure virtual switch is set up
+    setup_virtual_switch
+    
+    # Start and provision controller
+    echo -e "${BLUE}Starting and provisioning controller VM...${NC}"
+    start_controller_vm "false" || {
+        echo -e "${RED}Failed to setup controller VM.${NC}"
+        exit 1
+    }
+    
+    echo -e "${GREEN}Controller VM has been rebuilt and started!${NC}"
+    echo -e "${BLUE}Controller: ssh ${VM_USERNAME}@${CONTROLLER_IP}${NC}"
+    echo -e "${YELLOW}Note: You may need to restart compute nodes or update their Slurm configuration${NC}"
+    echo -e "${YELLOW}      if you made significant changes to the Slurm configuration.${NC}"
+}
+
 # Main script logic
 case "${1:-build}" in
     build-base)
@@ -1632,6 +1682,10 @@ case "${1:-build}" in
     build-nodes)
         echo -e "${GREEN}Building Slurm Compute Node VMs${NC}"
         create_compute_nodes
+        ;;
+    rebuild-controller)
+        echo -e "${GREEN}Rebuilding Controller VM Only${NC}"
+        rebuild_controller
         ;;
     build)
         # Ask user for setup mode
@@ -1714,7 +1768,18 @@ case "${1:-build}" in
         rm -f "$BASE_VM_IMAGE"
         ;;
     *)
-        echo "Usage: $0 {build|start|stop|clean|clean-all}"
+        echo "Usage: $0 {build|rebuild-controller|start|stop|clean|clean-all}"
+        echo ""
+        echo "Commands:"
+        echo "  build              - Build full cluster (interactive setup)"
+        echo "  rebuild-controller - Rebuild only the controller VM"
+        echo "  start              - Start all cluster VMs"
+        echo "  stop               - Stop all cluster VMs"
+        echo "  clean              - Remove cluster VMs (keep base image)"
+        echo "  clean-all          - Remove all VMs and base image"
+        echo "  build-base         - Build only the base VM image"
+        echo "  build-controller   - Build only the controller VM image"
+        echo "  build-nodes        - Build only the compute node VM images"
         exit 1
         ;;
 esac

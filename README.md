@@ -1,322 +1,72 @@
-# Slurm HPC Cluster with Vagrant
+# Slurm HPC Cluster Framework
 
-A complete, automated High-Performance Computing (HPC) cluster setup using Slurm workload manager, built with Vagrant and VirtualBox. Perfect for learning HPC concepts, testing Slurm configurations, and developing parallel applications.
+This framework provides an automated infrastructure stack for deploying a multi-node High-Performance Computing (HPC) cluster managed by the Slurm workload manager. Designed to transition smoothly from localized sandbox environments to physical infrastructure, the architecture handles compute provisioning, job accounting, network file sharing, and internal cluster authentication.
 
-## 🚀 Quick Start
-
-```bash
-# Initialize and start the cluster
-make cluster
-
-# Run test jobs
-make test
-
-# Connect to the cluster
-make connect
-
-# Stop the cluster
-make clean
-```
-
-## 📋 Table of Contents
-
-- [Features](#features)
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [Cluster Architecture](#cluster-architecture)
-- [Usage](#usage)
-- [Sample Jobs](#sample-jobs)
-- [Makefile Targets](#makefile-targets)
-- [Troubleshooting](#troubleshooting)
-- [Project Structure](#project-structure)
-
-## ✨ Features
-
-- **Fully Automated Setup**: One command cluster deployment
-- **Multi-Node Architecture**: 1 controller + 3 compute nodes
-- **Complete Slurm Stack**: Scheduler, database, authentication
-- **Sample Workloads**: Ready-to-run example jobs
-- **Resource Management**: CPU and memory allocation
-- **Job Accounting**: Database-backed job tracking
-- **Network File System**: Shared storage across nodes
-- **Source-Built Vagrant**: Latest Vagrant built from source
-
-## 📦 Prerequisites
-
-### System Requirements
-- **OS**: Linux (Ubuntu/Debian recommended)
-- **CPU**: 4+ cores, VT-x/AMD-V enabled in BIOS
-- **RAM**: 8GB minimum (16GB recommended)
-- **Disk**: 20GB free space
-- **Network**: Internet connection for initial setup
-
-### Software Dependencies
-```bash
-# Ubuntu/Debian
-sudo apt update
-sudo apt install -y make git virtualbox ruby ruby-dev build-essential
-
-# The project will build Vagrant from source automatically
-```
-
-## 🏗️ Cluster Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Slurm HPC Cluster                       │
-├─────────────────────────────────────────────────────────────┤
-│  Controller Node (slurm-controller)                        │
-│  • IP: 192.168.60.10                                       │
-│  • Services: slurmctld, slurmdbd, MariaDB, NFS             │
-│  • Resources: 2 CPU cores, 2GB RAM                         │
-├─────────────────────────────────────────────────────────────┤
-│  Compute Nodes (node1, node2, node3)                       │
-│  • IPs: 192.168.60.11-13                                   │
-│  • Services: slurmd, NFS client                            │
-│  • Resources: 2 CPU cores each, 1GB RAM each               │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Network Configuration
-- **Private Network**: 192.168.60.0/24
-- **Controller**: 192.168.60.10
-- **Compute Nodes**: 192.168.60.11-13
-- **Shared Storage**: NFS mounted on all nodes
-
-### Slurm Configuration
-- **Scheduler**: `sched/backfill` with `select/cons_tres`
-- **Authentication**: Munge-based cluster authentication
-- **Accounting**: MySQL/MariaDB via slurmdbd
-- **Default Partition**: `compute` with all nodes
-
-## 🎯 Usage
-
-### Basic Workflow
-
-1. **Start the cluster**:
-   ```bash
-   make cluster
-   ```
-   This will:
-   - Build Vagrant from source if needed
-   - Create and provision all VMs
-   - Install and configure Slurm
-   - Start all services
-
-2. **Submit jobs**:
-   ```bash
-   make test              # Run all sample jobs
-   make test-hello        # Run hello world job
-   make test-parallel     # Run parallel job
-   make test-stress       # Run CPU stress test
-   make test-array        # Run job array
-   ```
-
-3. **Monitor the cluster**:
-   ```bash
-   make status            # Check cluster status
-   make connect           # SSH to controller
-   ```
-
-4. **Clean up**:
-   ```bash
-   make clean             # Stop and destroy cluster
-   ```
-
-### Manual Operations
-
-Connect to the controller node:
-```bash
-make connect
-# OR
-./vagrant-wrapper.sh ssh controller
-```
-
-Once connected, use standard Slurm commands:
-```bash
-# Load Slurm environment
-source /etc/profile.d/slurm.sh
-
-# Check cluster status
-sinfo
-scontrol show nodes
-
-# Submit a job
-sbatch sample-jobs/hello_world.sh
-
-# Monitor jobs
-squeue
-squeue -u vagrant
-
-# View job history
-sacct
-sacct -j <job_id> --format=JobID,JobName,State,ExitCode,Start,End
-```
-
-## 📋 Sample Jobs
-
-The cluster includes several example jobs to demonstrate different Slurm features:
-
-### 1. Hello World (`hello_world.sh`)
-Basic single-node job that displays system information and performs a simple calculation.
-```bash
-sbatch sample-jobs/hello_world.sh
-```
-
-### 2. Parallel Job (`parallel_hello.sh`)
-Multi-node parallel job using `srun` to execute tasks across multiple compute nodes.
-```bash
-sbatch sample-jobs/parallel_hello.sh
-```
-
-### 3. CPU Stress Test (`cpu_stress.sh`)
-CPU-intensive workload to test cluster performance and resource allocation.
-```bash
-sbatch sample-jobs/cpu_stress.sh
-```
-
-### 4. Job Array (`array_job.sh`)
-Demonstrates Slurm job arrays with multiple independent tasks.
-```bash
-sbatch sample-jobs/array_job.sh
-```
-
-## 🛠️ Makefile Targets
-
-| Target | Description |
-|--------|-------------|
-| `make cluster` | Complete cluster setup (build Vagrant, start VMs, configure Slurm) |
-| `make test` | Run all sample jobs and display results |
-| `make test-hello` | Run hello world job |
-| `make test-parallel` | Run parallel job |
-| `make test-stress` | Run CPU stress test |
-| `make test-array` | Run job array |
-| `make status` | Show cluster and job status |
-| `make connect` | SSH to controller node |
-| `make logs` | Display Slurm service logs |
-| `make health` | Perform cluster health check |
-| `make stop` | Stop all VMs (keep them for restart) |
-| `make start` | Start stopped VMs |
-| `make clean` | Stop and destroy all VMs |
-| `make help` | Show all available targets |
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-#### VT-x/Hardware Virtualization
-```bash
-# Check if VT-x is enabled
-grep -E "(vmx|svm)" /proc/cpuinfo
-
-# If not found, enable VT-x in BIOS settings
-```
-
-#### Nodes Showing as DOWN
-```bash
-# Connect to controller and resume nodes
-make connect
-scontrol update NodeName=node[1-3] State=RESUME
-```
-
-#### Munge Authentication Errors
-```bash
-# Test munge on each node
-./vagrant-wrapper.sh ssh node1
-munge -n | unmunge
-
-# Restart munge if needed
-sudo systemctl restart munge
-```
-
-#### Database Connection Issues
-```bash
-# Check database connectivity
-./vagrant-wrapper.sh ssh controller
-mysql -h slurm-controller -u slurm -p slurm_acct_db
-
-# Restart slurmdbd
-sudo systemctl restart slurmdbd
-```
-
-#### Service Status Checks
-```bash
-# Check all services
-make health
-
-# Check specific logs
-make logs
-
-# Or manually check services
-./vagrant-wrapper.sh ssh controller
-sudo systemctl status slurmctld slurmdbd mariadb
-sudo journalctl -u slurmctld -f
-```
-
-### Log Locations
-- **Slurmctld**: `/var/log/slurm/slurmctld.log`
-- **Slurmd**: `/var/log/slurm/slurmd.log`
-- **Slurmdbd**: `/var/log/slurm/slurmdbd.log`
-- **Job Output**: `~/hello_world_<job_id>.out`
-
-## 📁 Project Structure
-
-```
-MyCluster/
-├── Makefile                    # Main automation and build commands
-├── README.md                   # This documentation
-├── Vagrantfile                 # VM and cluster configuration
-├── vagrant-wrapper.sh          # Wrapper for source-built Vagrant
-├── cluster-manager.sh          # Cluster lifecycle management
-├── preflight-check-source.sh   # Pre-deployment validation
-│
-├── scripts/                    # Provisioning scripts
-│   ├── setup-base.sh           # Shared HPC base installation (NEW)
-│   ├── setup-controller.sh     # Controller node setup
-│   ├── setup-compute.sh        # Compute node setup
-│   ├── setup-database.sh       # Database configuration
-│   ├── create-metal-iso.sh     # Bare metal ISO creation
-│   ├── simulate-metal.sh       # QEMU simulation for testing
-│   └── test-cluster.sh         # Job testing utilities
-│
-├── sample-jobs/                # Example Slurm job scripts
-│   ├── hello_world.sh          # Basic single-node job
-│   ├── parallel_hello.sh       # Multi-node parallel job
-│   ├── cpu_stress.sh           # CPU-intensive workload
-│   └── array_job.sh            # Job array example
-│
-├── slurm/                      # Slurm source code
-└── vagrant-src/                # Vagrant source code
-```
-
-## 🔐 Security Notes
-
-This cluster is designed for **development and testing only**. It includes:
-- Default passwords and keys
-- Permissive network settings
-- Minimal security hardening
-
-**Do not use this configuration in production environments.**
-
-## 🤝 Contributing
-
-Feel free to:
-- Report issues or bugs
-- Suggest improvements
-- Add new sample jobs
-- Enhance documentation
-
-## 📚 Resources
-
-- [Slurm Documentation](https://slurm.schedmd.com/documentation.html)
-- [Slurm Quick Start Guide](https://slurm.schedmd.com/quickstart.html)
-- [Vagrant Documentation](https://www.vagrantup.com/docs)
-- [VirtualBox Documentation](https://www.virtualbox.org/wiki/Documentation)
-
-## 📄 License
-
-This project is for educational and testing purposes. Slurm and other components retain their respective licenses.
+> ### ⚠️ Status and Configuration Warning (2026 Revision)
+> This repository is currently undergoing a comprehensive architectural overhaul. The legacy codebase contains configurations tightly coupled to specific local area network (LAN) topologies and environmental variables. It requires significant polishing and refactoring before deployment in varying networks. 
+>
+> As part of the 2026 development cycle, the legacy Vagrant and VirtualBox abstraction layers have been completely deprecated in favor of enterprise-grade cloud and bare-metal provisioning tools.
 
 ---
 
-**Happy HPC Computing!** 🚀
+## Evolving Infrastructure Stack
+
+To build a production-ready, scalable HPC environment, this project is migrating away from local virtualization wrappers toward a modern DevOps workflow. The next-generation deployment model relies on Terraform to manage stateful compute instances, private subnets, and isolated network fabrics across both cloud targets and local hypervisors. This infrastructure is paired with Warewulf, which operates as the stateless provisioning engine, utilizing iPXE to orchestrate compute node deployments directly into memory. Finally, Ansible handles the deterministic host configuration, automating uniform Munge keys, Slurm daemons, and MariaDB accounting backends across the entire cluster.
+
+---
+
+## Architectural Layout
+
+The cluster framework orchestrates a dedicated control plane linked to a scalable pool of execution nodes, interconnected via an isolated internal network fabric. 
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                      Slurm HPC Cluster                      │
+├─────────────────────────────────────────────────────────────┤
+│  [Control Plane] slurm-controller (Scheduler & Accounting)  │
+├─────────────────────────────────────────────────────────────┤
+│  [Execution Pool] node01 - nodeXX (Stateless Compute Nodes) │
+└─────────────────────────────────────────────────────────────┘
+```
+
+The controller node manages scheduler orchestration, job accounting, and data exports through primary services like `slurmctld` and `slurmdbd`. Meanwhile, the stateless compute nodes handle parallel task execution and resource reporting via the `slurmd` execution layer. The control plane utilizes backfill scheduling mechanisms paired with trackable resource selection algorithms. Authentication across the cluster boundaries is validated securely via local cryptographic Munge tokens, while all historical job metrics are synchronized downstream into a centralized SQL database engine.
+
+---
+
+## Sample Workload Execution
+
+Once the execution environment is active, individual tasks are dispatched via standard Slurm resource requests. The repository includes baseline verification templates located within the sample directory. You can dispatch a standard non-interactive tracking script via `sbatch sample-jobs/hello_world.sh`, allocate a multi-node task distributed via the internal launcher using `sbatch sample-jobs/parallel_hello.sh`, or trigger an execution array matrix for parallel computing with `sbatch sample-jobs/array_job.sh`.
+
+Active job lifecycles can be audited inside the cluster environment using native diagnostic tools:
+
+```bash
+sinfo     # Evaluates partition states and node availability
+squeue    # Inspects active scheduling queues and step states
+sacct     # Queries the slurmdbd accounting registry for metrics
+```
+
+---
+
+## Directory Infrastructure
+
+The framework maps installation phases to specific subsystem layouts, organizing core configuration logic cleanly away from sample cluster payloads. The `terraform/` directory holds cloud and virtualized fabric state manifests, while `ansible/` contains the playbooks for uniform node orchestration. Operational automation and cluster tooling are abstracted through the root `Makefile`. Furthermore, the `scripts/` directory houses provisioning utilities and environment hooks, keeping the collective baseline software layers separated from specific controller or compute node deployment instructions.
+
+---
+
+## Troubleshooting and Node Maintenance
+
+Compute nodes occasionally report a `DOWN` or `DRAIN` status if local telemetry flags unexpected hardware steps or communication timeouts during startup. The administrator can clear these defensive error flags manually from the controller console via `scontrol update NodeName=node[01-XX] State=RESUME` to restore scheduling access. 
+
+Additionally, Munge daemons require absolute clock synchronization and matching cryptographic key symmetry across every compute layer. If log files record handshake authorization failures, verify system time configurations and ensure the payload at `/etc/munge/munge.key` mirrors the master controller hash exactly with restrictive permission flags.
+
+---
+
+## Architectural Roadmap
+
+The long-term vision for this framework aims at building an elegant, decoupled, datacenter-grade architecture. Future releases will focus on the modular integration of three foundational layers. First, Open OnDemand will be integrated to provide researchers with an interactive, web-based frontend for job submission and graphical applications without SSH overhead. Beneath the surface, an OpenStack layer will be evaluated to orchestrate core virtualization boundaries on top of physical hardware. Finally, a resilient, distributed Ceph cluster will be implemented to handle dedicated stateful storage nodes, cleanly separated from the stateless compute pools that continue to be dynamically provisioned into memory via Warewulf and managed by Slurm.
+
+---
+
+## License & Development Notes
+
+This framework is optimized exclusively for educational infrastructure design, sandbox engineering, and parallel code prototyping. Hardcoded default database credentials and relaxed network configurations are active within development scripts. Hardening routines must be implemented prior to scaling any component into production environments. Distributed under standard open-source provisions.

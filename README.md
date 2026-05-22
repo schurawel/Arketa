@@ -24,22 +24,22 @@ This framework will define a strict **HPC Standard**. Current objectives are:
 
 Arketa is designed as an elegant, decoupled, datacenter-grade architecture that bridges the gap between hardware and user experience through extensive standardized vertical integration:
 
-### Compute Layer: Resource Management
-0. **[SLURM Workload Manager](https://slurm.schedmd.com/)** — The cornerstone of our HPC stack. SLURM provides open-source cluster resource management and job scheduling, managing compute node allocation, job queuing, and workload distribution. This is the authoritative resource arbiter upon which all higher layers depend.
+#### Compute Layer: Resource Management
+1. **[SLURM Workload Manager](https://slurm.schedmd.com/)** — The cornerstone of our HPC stack. SLURM provides open-source cluster resource management and job scheduling, managing compute node allocation, job queuing, and workload distribution. This is the authoritative resource arbiter upon which all higher layers depend.
 
-### User-Facing Layer
-1. **[Open OnDemand](https://openondemand.org/)** — Replaces traditional `sbatch` complexity with an intuitive web-based portal. Researchers submit jobs, launch interactive applications, and access graphical desktops through a unified interface, eliminating SSH complexity.
+#### User-Facing Layer
+2. **[Open OnDemand](https://openondemand.org/)** — Replaces traditional `sbatch` complexity with an intuitive web-based portal. Researchers submit jobs, launch interactive applications, and access graphical desktops through a unified interface, eliminating SSH complexity.
 
-### Resource & Telemetry Layer
-2. **[Coldfront](https://coldfront.readthedocs.io/)** — Enterprise resource allocation and project management. Tracks compute allocations, enforces quotas, and provides granular access controls across research groups and departments.
-3. **Specialized WebUIs** — Real-time cluster telemetry dashboards, job performance auditing, and historical analytics for capacity planning.
+#### Resource & Telemetry Layer
+3. **[Coldfront](https://coldfront.readthedocs.io/)** — Enterprise resource allocation and project management. Tracks compute allocations, enforces quotas, and provides granular access controls across research groups and departments.
+4. **Specialized WebUIs** — Real-time cluster telemetry dashboards, job performance auditing, and historical analytics for capacity planning.
 
-### Infrastructure Layer
-4. **[OpenStack](https://www.openstack.org/)** — Virtualization abstraction layer for flexible infrastructure provisioning and live migration capabilities.
-5. **[Ceph](https://ceph.io/)** — Resilient, distributed object storage for dedicated infrastructure workloads, cleanly separated from ephemeral compute node scratch space.
+#### Infrastructure Layer
+5. **[OpenStack](https://www.openstack.org/)** — Virtualization abstraction layer for flexible infrastructure provisioning and live migration capabilities.
+6. **[Ceph](https://ceph.io/)** — Resilient, distributed object storage for dedicated infrastructure workloads, cleanly separated from ephemeral compute node scratch space.
 
-### Emerging Paradigms
-6. **Kubernetes Integration** — Experimental initiatives are exploring SLURM-Kubernetes integration for hybrid containerized workloads. While [Borg](https://research.google/pubs/large-scale-cluster-management-at-google-with-borg/) remains the gold standard, it is not yet fully open-source; we monitor community developments in this space.
+#### Emerging Paradigms
+7. **Kubernetes Integration** — Experimental initiatives are exploring SLURM-Kubernetes integration for hybrid containerized workloads. While [Borg](https://research.google/pubs/large-scale-cluster-management-at-google-with-borg/) remains the gold standard, it is not yet fully open-source; we monitor community developments in this space.
 
 ---
 

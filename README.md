@@ -1,6 +1,6 @@
 ![Arketa Logo](./arketa_logo.png)
 
-# A Paradigm Shift to Elegant. Standardized. Parallel. Infrastructure.
+## A Paradigm Shift to Elegant. Standardized. Parallel. Infrastructure.
 
 Deploying HPC clusters is historically a fragmented, error-prone endeavor. Arketa : : Schurawel establishes a singular, authoritative "DNA Controller"—a master node encapsulating the entire system configuration, network topology, and compute resource definitions. This architecture ensures deterministic cluster provisioning and eliminates manual configuration drift.
 
@@ -9,7 +9,7 @@ Deploying HPC clusters is historically a fragmented, error-prone endeavor. Arket
 
 ---
 
-## The Infrastructure DNA Philosophy
+### The Infrastructure DNA Philosophy
 
 The core objective is to move from "manual configuration" to deterministic system injection. Compute nodes become ephemeral entities that inherit their entire system identity from the DNA Controller.
 
@@ -20,7 +20,7 @@ This framework will define a strict **HPC Standard**. Current objectives are:
 
 ---
 
-## Architectural Roadmap: The Decoupled Data Center
+### Architectural Roadmap: The Decoupled Data Center
 
 Arketa is designed as an elegant, decoupled, datacenter-grade architecture that bridges the gap between hardware and user experience through extensive standardized vertical integration:
 
@@ -43,7 +43,7 @@ Arketa is designed as an elegant, decoupled, datacenter-grade architecture that 
 
 ---
 
-## License & Intellectual Property
+### License & Intellectual Property
 
 This framework is optimized for educational infrastructure design, sandbox engineering, and parallel code prototyping. 
 

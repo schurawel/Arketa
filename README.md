@@ -1,6 +1,6 @@
-# Arketa : : Schurawel — Standardizing HPC Infrastructure
+![Arketa Logo](./arketa_logo.png)
 
-![Arketa Logo](./aketa_logo.png)
+# A Paradigm Shift to Elegant. Standardized. Parallel. Infrastructure.
 
 Deploying HPC clusters is historically a fragmented, error-prone endeavor. Arketa : : Schurawel establishes a singular, authoritative "DNA Controller"—a master node encapsulating the entire system configuration, network topology, and compute resource definitions. This architecture ensures deterministic cluster provisioning and eliminates manual configuration drift.
 

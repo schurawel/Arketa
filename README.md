@@ -41,8 +41,4 @@ Experimental initiatives are exploring SLURM-Kubernetes integration for hybrid c
 
 ### License & Intellectual Property
 
-This framework is optimized for educational infrastructure design, sandbox engineering, and parallel code prototyping. 
-
-**Copyright (c) 2026 Jason A. Schurawel. All rights reserved.**
-
-Distributed under the [MIT License](https://opensource.org/licenses/MIT). This license allows for reuse, modification, and integration into proprietary or open-source projects, provided that the original copyright notice and disclaimer are retained.
+This software is licensed under the GNU General Public License v3.0, allowing you to freely use, modify, and distribute the code provided that you maintain the same license terms.

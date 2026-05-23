@@ -42,3 +42,5 @@ Experimental initiatives are exploring SLURM-Kubernetes integration for hybrid c
 ### License & Intellectual Property
 
 This software is licensed under the GNU General Public License v3.0, allowing you to freely use, modify, and distribute the code provided that you maintain the same license terms.
+
+*Note on the codebase:* This version temporarily contains a copy of the **Slurm** repository in a subfolder for self-contained compilation/testing purposes. Slurm is the property of SchedMD and licensed under the GPLv2. It will be removed in a future version.

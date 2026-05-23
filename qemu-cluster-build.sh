@@ -1,6 +1,13 @@
 #!/bin/bash
 # QEMU Cluster Build Script - Build and deploy Slurm cluster using QEMU/KVM
 
+# Ensure script is run from PrimedSLURM directory
+if [ ! -f "README.md" ] || [ ! -d "scripts" ]; then
+    echo -e "\033[0;31mError: This script must be run from the PrimedSLURM directory.\033[0m"
+    echo -e "\033[1;33mPlease cd to the PrimedSLURM directory and run: ./qemu-cluster-build.sh\033[0m"
+    exit 1
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -12,16 +19,16 @@ NC='\033[0m' # No Color
 SETUP_MODE="standard"
 
 # Configuration
-VM_DIR="/home/thinclient/Documents/PrimedSLURM/qemu-vms"
-BASE_IMAGE="${VM_DIR}/saved-ubuntu-vm.qcow2"
-BASE_VM_IMAGE="${VM_DIR}/slurm-base-vm.qcow2"
-CONTROLLER_IMAGE="${VM_DIR}/slurm-controller.qcow2"
-NODE1_IMAGE="${VM_DIR}/slurm-node1.qcow2"
-NODE2_IMAGE="${VM_DIR}/slurm-node2.qcow2"
-# Use home directory for temp files where user has write permissions
-TMP_DIR="/home/thinclient/Documents/PrimedSLURM/tmp/qemu-build"
-SCRIPTS_DIR="/home/thinclient/Documents/PrimedSLURM/scripts"
-SAMPLE_JOBS_DIR="/home/thinclient/Documents/PrimedSLURM/sample-jobs"
+VM_DIR="./qemu-vms"
+BASE_IMAGE="$(pwd)/${VM_DIR}/saved-ubuntu-vm.qcow2"
+BASE_VM_IMAGE="$(pwd)/${VM_DIR}/slurm-base-vm.qcow2"
+CONTROLLER_IMAGE="$(pwd)/${VM_DIR}/slurm-controller.qcow2"
+NODE1_IMAGE="$(pwd)/${VM_DIR}/slurm-node1.qcow2"
+NODE2_IMAGE="$(pwd)/${VM_DIR}/slurm-node2.qcow2"
+# Use relative path for temp files
+TMP_DIR="./tmp/qemu-build"
+SCRIPTS_DIR="./scripts"
+SAMPLE_JOBS_DIR="./sample-jobs"
 
 # Network configuration
 BRIDGE_NAME="vswitch0"
@@ -209,9 +216,9 @@ EOF
     sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -P 2222 -r "$SCRIPTS_DIR" "${VM_USERNAME}@localhost:~/"
     
     # Copy Slurm source if available
-    if [ -d "/home/thinclient/Documents/PrimedSLURM/tmp/slurm" ]; then
+    if [ -d "./tmp/slurm" ]; then
         echo -e "${BLUE}Copying Slurm source code...${NC}"
-        sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -P 2222 -r "/home/thinclient/Documents/PrimedSLURM/tmp/slurm" "${VM_USERNAME}@localhost:~/slurm-src"
+        sshpass -p "$VM_PASSWORD" scp -o StrictHostKeyChecking=no -P 2222 -r "./tmp/slurm" "${VM_USERNAME}@localhost:~/slurm-src"
     fi
     
     # Run setup-base.sh script

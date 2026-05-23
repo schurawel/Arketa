@@ -32,10 +32,18 @@ fi
 
 echo "Setting up Slurm Compute Node ${NODE_ID}..."
 
-# Add host entries (moved from Vagrantfile)
-grep -q "slurm-controller" /etc/hosts || echo "192.168.7.10 slurm-controller controller" >> /etc/hosts
-grep -q "node1" /etc/hosts || echo "192.168.7.11 node1" >> /etc/hosts
-grep -q "node2" /etc/hosts || echo "192.168.7.12 node2" >> /etc/hosts
+# Add host entries (updated for actual server network)
+# Remove old entries first to avoid duplicates
+sed -i '/slurm-controller/d' /etc/hosts
+sed -i '/node1/d' /etc/hosts
+sed -i '/node2/d' /etc/hosts
+sed -i '/controller/d' /etc/hosts
+sed -i '/server[2-4]/d' /etc/hosts
+
+# Add correct entries
+echo "192.168.1.202 slurm-controller controller server2" >> /etc/hosts
+echo "192.168.1.203 node1 server3" >> /etc/hosts
+echo "192.168.1.204 node2 server4" >> /etc/hosts
 
 # Set hostname
 hostnamectl set-hostname node${NODE_ID}
@@ -100,7 +108,21 @@ grep -q "slurm-controller:/shared" /etc/fstab || echo "slurm-controller:/shared 
 
 # Attempt to mount the shared directory
 echo "Mounting controller:/shared to /shared..."
-mount -t nfs slurm-controller:/shared /shared || echo "⚠️ NFS mount failed, will try later"
+
+# Test if controller is reachable first
+echo "Testing connectivity to controller..."
+if ! ping -c 2 slurm-controller >/dev/null 2>&1; then
+    echo "⚠️ Cannot reach slurm-controller, NFS mount will likely fail"
+fi
+
+# Try mounting with timeout to prevent hanging
+timeout 30 mount -t nfs slurm-controller:/shared /shared || {
+    echo "⚠️ NFS mount failed or timed out after 30 seconds"
+    echo "🔧 Checking NFS server status on controller..."
+    # Show debug information
+    showmount -e slurm-controller 2>&1 || echo "showmount failed - NFS server may not be running"
+    echo "Will attempt mount again later in the script..."
+}
 
 # Ensure proper permissions on the shared directory
 chmod 777 /shared 2>/dev/null || true
@@ -134,6 +156,22 @@ else
     # Fallback environment setup
     export PATH="/opt/slurm/bin:/opt/slurm/sbin:$PATH"
     export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"
+fi
+
+# Verify SLURM installation before proceeding
+echo "🔍 Verifying SLURM installation..."
+if [ ! -f "/opt/slurm/sbin/slurmd" ]; then
+    echo "❌ ERROR: SLURM node daemon (slurmd) not found at /opt/slurm/sbin/slurmd"
+    echo "Please ensure SLURM was properly installed by setup-base.sh"
+    exit 1
+fi
+
+slurm_version=$(/opt/slurm/sbin/slurmd -V 2>/dev/null | head -1 || echo "unknown")
+if [ "$slurm_version" = "unknown" ]; then
+    echo "❌ ERROR: SLURM installation appears to be corrupted - slurmd not responding"
+    exit 1
+else
+    echo "✅ SLURM installation verified: $slurm_version"
 fi
 
 # Wait for controller to be ready and shared directory to be available
@@ -416,7 +454,9 @@ fi
 
 # Ensure proper NFS server configuration in exports file
 if [ -f /etc/exports ]; then
-    sed -i 's/192.168.121.0\/24/192.168.7.0\/24/g' /etc/exports
+    # Update old network references to use the correct network
+    sed -i 's/192.168.121.0\/24/192.168.1.0\/24/g' /etc/exports
+    sed -i 's/192.168.7.0\/24/192.168.1.0\/24/g' /etc/exports
     exportfs -ra 2>/dev/null || true
 fi
 

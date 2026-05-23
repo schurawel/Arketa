@@ -3,6 +3,11 @@
 
 set -e
 
+# Logging functions
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1"; }
+warn() { echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] $1" >&2; }
+error() { echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] $1" >&2; }
+
 # Parse command line arguments
 LINEAR_MODE=false
 for arg in "$@"; do
@@ -16,10 +21,18 @@ done
 
 echo "Setting up Slurm Controller Node..."
 
-# Add host entries (moved from Vagrantfile)
-grep -q "slurm-controller" /etc/hosts || echo "192.168.7.10 slurm-controller controller" >> /etc/hosts
-grep -q "node1" /etc/hosts || echo "192.168.7.11 node1" >> /etc/hosts
-grep -q "node2" /etc/hosts || echo "192.168.7.12 node2" >> /etc/hosts
+# Add host entries (updated for actual server network)
+# Remove old entries first to avoid duplicates
+sed -i '/slurm-controller/d' /etc/hosts
+sed -i '/node1/d' /etc/hosts
+sed -i '/node2/d' /etc/hosts
+sed -i '/controller/d' /etc/hosts
+sed -i '/server[2-4]/d' /etc/hosts
+
+# Add correct entries
+echo "192.168.1.202 slurm-controller controller server2" >> /etc/hosts
+echo "192.168.1.203 node1 server3" >> /etc/hosts
+echo "192.168.1.204 node2 server4" >> /etc/hosts
 
 # Set hostname
 hostnamectl set-hostname slurm-controller
@@ -93,6 +106,12 @@ wait_for_apt_locks 600 || {
 apt-get update
 # NFS server, desktop environments, and VNC packages are now installed in setup-base.sh
 
+# Create slurm user if it doesn't exist (needed for directory ownership)
+if ! id slurm &>/dev/null; then
+    echo "Creating slurm user..."
+    useradd -r -s /bin/false slurm 2>/dev/null || echo "Slurm user creation failed or already exists"
+fi
+
 # Setup shared directory
 mkdir -p /shared
 chown slurm:slurm /shared
@@ -103,18 +122,35 @@ mkdir -p /shared/mpi-jobs
 chmod 777 /shared/mpi-jobs
 chown slurm:slurm /shared/mpi-jobs
 
-# Configure NFS export for shared directory - FIXED NETWORK ADDRESS
-grep -q "/shared 192.168.7.0/24" /etc/exports || echo "/shared 192.168.7.0/24(rw,sync,no_subtree_check,no_root_squash)" > /etc/exports
+# Ensure NFS packages are installed
+log "Ensuring NFS server packages are installed..."
+if ! dpkg -l | grep -q nfs-kernel-server; then
+    log "Installing NFS server packages..."
+    apt-get update
+    apt-get install -y nfs-kernel-server nfs-common
+fi
+
+# Create /etc/exports if it doesn't exist
+if [ ! -f /etc/exports ]; then
+    log "Creating /etc/exports file..."
+    touch /etc/exports
+fi
+
+# Configure NFS export for shared directory - UPDATED NETWORK ADDRESS
+log "Configuring NFS exports..."
+grep -q "/shared 192.168.1.0/24" /etc/exports || echo "/shared 192.168.1.0/24(rw,sync,no_subtree_check,no_root_squash)" >> /etc/exports
 # Also remove old exports if they exist
+sed -i '/\/shared 192.168.7.0\/24/d' /etc/exports
 sed -i '/\/shared 192.168.121.0\/24/d' /etc/exports
 
 # Enable and restart NFS server with proper settings
+log "Enabling and starting NFS server..."
 systemctl enable nfs-kernel-server
 systemctl restart nfs-kernel-server
 exportfs -ra
 
 # Verify exports are configured correctly
-echo "Verifying NFS exports..."
+log "Verifying NFS exports..."
 exportfs -v
 
 # Source the Slurm environment (should be available from base setup)
@@ -130,12 +166,35 @@ if ! grep -q "opt/slurm" /etc/bash.bashrc; then
     echo 'export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"' >> /etc/bash.bashrc
 fi
 
+# Check if SLURM is properly installed before proceeding
+log "Verifying SLURM installation..."
 if [ -f /etc/profile.d/slurm.sh ]; then
     source /etc/profile.d/slurm.sh
 else
     # Fallback environment setup
     export PATH="/opt/slurm/bin:/opt/slurm/sbin:$PATH"
     export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"
+fi
+
+# Verify SLURM binaries are available
+if [ ! -f "/opt/slurm/sbin/slurmctld" ]; then
+    error "SLURM controller daemon (slurmctld) not found at /opt/slurm/sbin/slurmctld"
+    error "Please ensure SLURM was properly installed by setup-base.sh"
+    exit 1
+fi
+
+if [ ! -f "/opt/slurm/sbin/slurmd" ]; then
+    error "SLURM node daemon (slurmd) not found at /opt/slurm/sbin/slurmd"
+    error "Please ensure SLURM was properly installed by setup-base.sh"
+    exit 1
+fi
+
+slurm_version=$(/opt/slurm/sbin/slurmctld -V 2>/dev/null | head -1 || echo "unknown")
+if [ "$slurm_version" = "unknown" ]; then
+    error "SLURM installation appears to be corrupted - slurmctld not responding"
+    exit 1
+else
+    log "✅ SLURM installation verified: $slurm_version"
 fi
 
 # Setup Munge authentication with shared key from host system
@@ -221,7 +280,31 @@ echo "✅ Copied cgroup.conf"
 # Copy configuration files to shared directory for compute nodes
 cp /etc/slurm/slurm.conf /shared/
 cp /etc/slurm/cgroup.conf /shared/
+
+# Also create the expected directory structure for compute nodes
+mkdir -p /shared/scripts/configs
+cp /etc/slurm/slurm.conf /shared/scripts/configs/
+cp /etc/slurm/cgroup.conf /shared/scripts/configs/
 echo "✅ Configuration files copied to shared directory"
+echo "✅ Configuration files also copied to /shared/scripts/configs/ for compute nodes"
+
+# Copy sample-jobs folder to shared directory for all nodes to access
+echo "📋 Copying sample-jobs folder to shared directory..."
+if [ -d "$(dirname "$0")/../sample-jobs" ]; then
+    mkdir -p /shared/sample-jobs
+    cp -r "$(dirname "$0")/../sample-jobs/"* /shared/sample-jobs/
+    chmod +x /shared/sample-jobs/*.sh 2>/dev/null || true
+    echo "✅ Sample jobs copied from: $(dirname "$0")/../sample-jobs"
+elif [ -d "/home/ubuntu/sample-jobs" ]; then
+    mkdir -p /shared/sample-jobs
+    cp -r "/home/ubuntu/sample-jobs/"* /shared/sample-jobs/
+    chmod +x /shared/sample-jobs/*.sh 2>/dev/null || true
+    echo "✅ Sample jobs copied from: /home/ubuntu/sample-jobs"
+else
+    echo "⚠️ Sample jobs folder not found in expected locations:"
+    echo "   - $(dirname "$0")/../sample-jobs"
+    echo "   - /home/ubuntu/sample-jobs"
+fi
 
 # Create systemd service files  
 cat > /etc/systemd/system/slurmctld.service << 'EOF'
@@ -281,42 +364,84 @@ mkdir -p /var/spool/slurmd /var/log/slurm /run/slurm
 chown slurm:slurm /var/spool/slurmd /var/log/slurm /run/slurm
 chmod 755 /var/spool/slurmd /var/log/slurm /run/slurm
 
-# Enable and start services
-systemctl daemon-reload
-systemctl enable slurmctld
-systemctl start slurmctld
-systemctl enable slurmd
-systemctl start slurmd
+# Check if services are already running to avoid unnecessary restarts
+slurmctld_running=false
+slurmd_running=false
 
-echo "Starting slurmd service..."
-if ! systemctl start slurmd; then
-    echo "ERROR: Failed to start slurmd service"
-    echo "=== Service status ==="
-    systemctl status slurmd --no-pager -l || true
-    echo "=== Journal logs ==="
-    journalctl -xeu slurmd.service --no-pager --lines=30 || true
-    echo "=== Slurm logs ==="
-    tail -50 /var/log/slurm/slurmd.log 2>/dev/null || echo "No slurmd.log found"
-    echo "=== Testing manual slurmd run ==="
-    timeout 10 /opt/slurm/sbin/slurmd -D -vvv || true
-    exit 1
+if systemctl is-active --quiet slurmctld; then
+    log "✅ slurmctld service is already running"
+    slurmctld_running=true
+else
+    log "slurmctld service not running - will start it"
+fi
+
+if systemctl is-active --quiet slurmd; then
+    log "✅ slurmd service is already running"  
+    slurmd_running=true
+else
+    log "slurmd service not running - will start it"
+fi
+
+# Enable and start services only if they're not already running
+systemctl daemon-reload
+
+if [ "$slurmctld_running" = "false" ]; then
+    log "Starting slurmctld service..."
+    systemctl enable slurmctld
+    systemctl start slurmctld
+else
+    log "Ensuring slurmctld is enabled..."
+    systemctl enable slurmctld
+fi
+
+if [ "$slurmd_running" = "false" ]; then
+    log "Starting slurmd service..."
+    systemctl enable slurmd
+    
+    echo "Starting slurmd service..."
+    if ! systemctl start slurmd; then
+        echo "ERROR: Failed to start slurmd service"
+        echo "=== Service status ==="
+        systemctl status slurmd --no-pager -l || true
+        echo "=== Journal logs ==="
+        journalctl -xeu slurmd.service --no-pager --lines=30 || true
+        echo "=== Slurm logs ==="
+        tail -50 /var/log/slurm/slurmd.log 2>/dev/null || echo "No slurmd.log found"
+        echo "=== Testing manual slurmd run ==="
+        timeout 10 /opt/slurm/sbin/slurmd -D -vvv || true
+        exit 1
+    fi
+else
+    log "Ensuring slurmd is enabled..."
+    systemctl enable slurmd
 fi
 
 # Run the setup script for the Slurm Database Daemon
+SLURMDBD_SCRIPT=""
 if [ -f "/home/ubuntu/scripts/setup-slurmdbd.sh" ]; then
-    if [ "$LINEAR_MODE" = "true" ]; then
-        /home/ubuntu/scripts/setup-slurmdbd.sh --linear-setup
-    else
-        /home/ubuntu/scripts/setup-slurmdbd.sh
-    fi
+    SLURMDBD_SCRIPT="/home/ubuntu/scripts/setup-slurmdbd.sh"
 elif [ -f "/home/vagrant/scripts/setup-slurmdbd.sh" ]; then
+    SLURMDBD_SCRIPT="/home/vagrant/scripts/setup-slurmdbd.sh"
+elif [ -f "$HOME/scripts/setup-slurmdbd.sh" ]; then
+    SLURMDBD_SCRIPT="$HOME/scripts/setup-slurmdbd.sh"
+elif [ -f "./scripts/setup-slurmdbd.sh" ]; then
+    SLURMDBD_SCRIPT="./scripts/setup-slurmdbd.sh"
+fi
+
+if [ -n "$SLURMDBD_SCRIPT" ]; then
+    echo "Found setup-slurmdbd.sh at: $SLURMDBD_SCRIPT"
     if [ "$LINEAR_MODE" = "true" ]; then
-        /home/vagrant/scripts/setup-slurmdbd.sh --linear-setup
+        $SLURMDBD_SCRIPT --linear-setup
     else
-        /home/vagrant/scripts/setup-slurmdbd.sh
+        $SLURMDBD_SCRIPT
     fi
 else
     echo "ERROR: setup-slurmdbd.sh script not found in expected locations"
+    echo "Checked paths:"
+    echo "  - /home/ubuntu/scripts/setup-slurmdbd.sh"
+    echo "  - /home/vagrant/scripts/setup-slurmdbd.sh"
+    echo "  - $HOME/scripts/setup-slurmdbd.sh"
+    echo "  - ./scripts/setup-slurmdbd.sh"
     exit 1
 fi
 
@@ -414,7 +539,7 @@ if [ -f /home/ubuntu/scripts/setup-ondemand.sh ]; then
         }
     fi
     echo "✅ Open OnDemand setup attempt complete."
-    echo "👉 Access the portal at http://192.168.7.10/"
+    echo "👉 Access the portal at http://192.168.1.202/"
     echo "👤 Login: ooduser / ooduser"
 elif [ -f /home/vagrant/scripts/setup-ondemand.sh ]; then
     chmod +x /home/vagrant/scripts/setup-ondemand.sh
@@ -461,7 +586,7 @@ if [ -d "/home/ubuntu/scripts" ]; then
            # }
         fi
         echo "✅ slurm-web setup complete."
-        echo "👉 Access the portal at http://192.168.7.10:5011"
+        echo "👉 Access the portal at http://192.168.1.202:5011"
     fi
 else
     echo "🤷 Skipping slurm-web setup: scripts directory not found."

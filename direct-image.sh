@@ -1,8 +1,15 @@
 #!/bin/bash
 # Simple direct VM runner - uses standard Ubuntu cloud image
 
+# Ensure script is run from PrimedSLURM directory
+if [ ! -f "README.md" ] || [ ! -d "scripts" ]; then
+    echo -e "\033[0;31mError: This script must be run from the PrimedSLURM directory.\033[0m"
+    echo -e "\033[1;33mPlease cd to the PrimedSLURM directory and run: ./direct-image.sh\033[0m"
+    exit 1
+fi
+
 # Add debug mode to see exactly where execution stops
-set -x  # Print commands as they're executed
+# set -x  # Print commands as they're executed (disabled for cleaner VM console output)
 # set -e  # Comment out "set -e" temporarily for debugging (prevents immediate exit on error)
 
 # Colors
@@ -47,11 +54,10 @@ kill_qemu_processes
 echo "Debug: After kill_qemu_processes call" # Debug message
 
 # Configuration
-UBUNTU_CLOUD_IMAGE="ubuntu-22.04-server-cloudimg-amd64.img"
-UBUNTU_CLOUD_URL="https://cloud-images.ubuntu.com/releases/22.04/release/${UBUNTU_CLOUD_IMAGE}"
-VM_DIR="/home/thinclient/Documents/PrimedSLURM/qemu-vms"
-PROJECT_DIR="/home/thinclient/Documents/PrimedSLURM"
-IMAGE_PATH="${PROJECT_DIR}/${UBUNTU_CLOUD_IMAGE}"  # Look for image in project dir, not VM_DIR
+UBUNTU_CLOUD_URL="https://cloud-images.ubuntu.com/releases/plucky/release/ubuntu-25.04-server-cloudimg-amd64.img"
+VM_DIR="./qemu-vms"
+PROJECT_DIR="."
+IMAGE_PATH="$(pwd)/ubuntu-25.04-server-cloudimg-amd64.img"  # Use absolute path to avoid relative path issues
 
 # Check if directories exist and are writable
 echo "Debug: Checking directories"

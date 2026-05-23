@@ -43,11 +43,134 @@ apt install -y curl gnupg2 ca-certificates lsb-release wget || handle_error "Fai
 echo "📦 Adding Open OnDemand repository..."
 
 sudo apt install -y apt-transport-https ca-certificates
-wget -O /tmp/ondemand-release-web_4.0.0-jammy_all.deb https://apt.osc.edu/ondemand/4.0/ondemand-release-web_4.0.0-jammy_all.deb
-sudo apt install -y /tmp/ondemand-release-web_4.0.0-jammy_all.deb
-sudo apt update
 
-sudo apt install -y ondemand
+# Detect Ubuntu version and use appropriate OnDemand repository
+UBUNTU_CODENAME=$(lsb_release -cs)
+UBUNTU_VERSION=$(lsb_release -rs)
+echo "📋 Detected Ubuntu version: $UBUNTU_CODENAME ($UBUNTU_VERSION)"
+
+case "$UBUNTU_CODENAME" in
+    "noble"|"24.04")
+        echo "📋 Ubuntu 24.04 detected - using direct installation approach"
+        
+        # For Ubuntu 24.04, install OnDemand using Ruby gems directly
+        echo "📦 Installing Ruby development environment from default repositories..."
+        apt install -y ruby-full ruby-dev ruby-bundler build-essential git libssl-dev libreadline-dev zlib1g-dev
+        
+        # Install Node.js via NodeSource repository to avoid conflicts
+        echo "📦 Installing Node.js via NodeSource repository..."
+        curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+        apt install -y nodejs
+        
+        # Install Apache and required modules
+        echo "📦 Installing Apache and required modules..."
+        apt install -y apache2 apache2-dev libapache2-mod-wsgi-py3
+        
+        # Install OnDemand directly using Ruby gems
+        echo "📦 Installing OnDemand via Ruby gems..."
+        gem install bundler
+        
+        # Create OnDemand directories
+        mkdir -p /opt/ood /var/www/ood /etc/ood/config
+        
+        # Clone OnDemand source
+        cd /tmp
+        if [ ! -d "ondemand" ]; then
+            git clone https://github.com/OSC/ondemand.git
+            cd ondemand
+            git checkout v3.1.1  # Use stable version
+        else
+            cd ondemand
+        fi
+        
+        # Install OnDemand dependencies and build
+        bundle config set --local path 'vendor/bundle'
+        bundle install --without test
+        
+        # Copy OnDemand to installation directory
+        cp -r . /opt/ood/
+        chown -R root:root /opt/ood
+        
+        # Create symlinks
+        ln -sf /opt/ood /var/www/ood/ondemand
+        mkdir -p /var/www/ood/public
+        mkdir -p /var/www/ood/apps/sys
+        
+        echo "✅ OnDemand installed from source for Ubuntu 24.04"
+        ONDEMAND_SOURCE_INSTALL=true
+        ;;
+    "jammy"|"22.04")
+        echo "📋 Ubuntu 22.04 detected - using native OnDemand repository"
+        ONDEMAND_DEB_URL="https://apt.osc.edu/ondemand/4.0/ondemand-release-web_4.0.0-jammy_all.deb"
+        ;;
+    "focal"|"20.04")
+        echo "📋 Ubuntu 20.04 detected - using focal OnDemand repository"
+        ONDEMAND_DEB_URL="https://apt.osc.edu/ondemand/4.0/ondemand-release-web_4.0.0-focal_all.deb"
+        ;;
+    *)
+        echo "⚠️ WARNING: Unsupported Ubuntu version ($UBUNTU_CODENAME). Attempting with Jammy repository..."
+        ONDEMAND_DEB_URL="https://apt.osc.edu/ondemand/4.0/ondemand-release-web_4.0.0-jammy_all.deb"
+        ;;
+esac
+
+# Skip package installation if we already installed from source
+if [ "$ONDEMAND_SOURCE_INSTALL" != "true" ]; then
+    echo "📦 Downloading OnDemand repository package from: $ONDEMAND_DEB_URL"
+    wget -O /tmp/ondemand-release-web.deb "$ONDEMAND_DEB_URL"
+    sudo apt install -y /tmp/ondemand-release-web.deb
+    sudo apt update
+fi
+
+echo "📦 Installing OnDemand..."
+
+# Skip package installation if we already installed from source
+if [ "$ONDEMAND_SOURCE_INSTALL" = "true" ]; then
+    echo "✅ OnDemand already installed from source"
+else
+    # Try package installation for supported Ubuntu versions
+    if ! sudo apt install -y ondemand; then
+        echo "❌ OnDemand installation failed with official repository"
+        echo "📋 Installing OnDemand from source as alternative..."
+        
+        # Install required packages for source installation
+        apt install -y ruby-full ruby-dev ruby-bundler build-essential git libssl-dev libreadline-dev zlib1g-dev apache2 apache2-dev libapache2-mod-wsgi-py3
+        
+        # Install Node.js via NodeSource repository to avoid conflicts
+        echo "📦 Installing Node.js via NodeSource repository..."
+        curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+        apt install -y nodejs
+        
+        # Install OnDemand from source
+        cd /tmp
+        if [ ! -d "ondemand" ]; then
+            git clone https://github.com/OSC/ondemand.git
+            cd ondemand
+            git checkout v3.1.1  # Use stable version
+        else
+            cd ondemand
+        fi
+        
+        # Build and install OnDemand
+        gem install bundler
+        bundle config set --local path 'vendor/bundle'
+        bundle install --without test
+        
+        # Create OnDemand directories
+        mkdir -p /opt/ood /var/www/ood /etc/ood/config
+        
+        # Copy OnDemand to installation directory
+        cp -r . /opt/ood/
+        chown -R root:root /opt/ood
+        
+        # Create symlinks
+        ln -sf /opt/ood /var/www/ood/ondemand
+        mkdir -p /var/www/ood/public
+        mkdir -p /var/www/ood/apps/sys
+        
+        echo "✅ OnDemand installed from source"
+        ONDEMAND_SOURCE_INSTALL=true
+    fi
+fi
 
 # 3. Fix Apache configuration issues
 echo "🛠️ Fixing Apache configuration..."
@@ -85,8 +208,66 @@ sudo a2enmod lua
 
 # 4. Configure authentication (basic auth for testing)
 echo "🔐 Setting up basic authentication for testing..."
-# Create a test user 'ooduser' with password 'ooduser'
+
+# Create OnDemand config directory
 sudo mkdir -p /etc/ood/config
+
+# If OnDemand was installed from source, set up additional directories
+if [ "$ONDEMAND_SOURCE_INSTALL" = "true" ]; then
+    echo "🔧 Configuring source-based OnDemand installation..."
+    
+    # Create necessary directories
+    sudo mkdir -p /var/www/ood/apps/sys
+    sudo mkdir -p /var/www/ood/public
+    sudo mkdir -p /opt/ood/ood-portal-generator/sbin
+    
+    # Create basic portal generator script
+    sudo tee /opt/ood/ood-portal-generator/sbin/update_ood_portal > /dev/null <<'PORTAL_GEN'
+#!/bin/bash
+# Basic portal generator for source installation
+echo "Generating OnDemand portal configuration..."
+
+# Create basic Apache configuration for OnDemand
+cat > /etc/apache2/sites-available/ood-portal.conf << 'APACHE_CONF'
+<VirtualHost *:80>
+  ServerName slurm-controller
+  DocumentRoot /var/www/ood/public
+
+  # Authentication
+  <Location "/">
+    AuthType Basic
+    AuthName "Open OnDemand"
+    AuthUserFile /etc/ood/config/htpasswd
+    Require valid-user
+  </Location>
+
+  # Proxy for OnDemand apps
+  ProxyPreserveHost On
+  ProxyPass /pun/ http://localhost:5000/
+  ProxyPassReverse /pun/ http://localhost:5000/
+
+  # Static assets
+  Alias /public /var/www/ood/public
+  <Directory "/var/www/ood/public">
+    Require all granted
+  </Directory>
+
+  # Log files
+  ErrorLog /var/log/apache2/ood_error.log
+  CustomLog /var/log/apache2/ood_access.log combined
+</VirtualHost>
+APACHE_CONF
+
+echo "OnDemand portal configuration generated"
+PORTAL_GEN
+    sudo chmod +x /opt/ood/ood-portal-generator/sbin/update_ood_portal
+    
+    # Create minimal public directory structure
+    sudo mkdir -p /var/www/ood/public
+    echo "<h1>OnDemand Web Portal</h1><p>SLURM cluster access portal</p>" | sudo tee /var/www/ood/public/index.html > /dev/null
+fi
+
+# Create a test user 'ooduser' with password 'ooduser'
 htpasswd -b -c /etc/ood/config/htpasswd ooduser ooduser
 
 # Create corresponding system user

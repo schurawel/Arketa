@@ -1,6 +1,13 @@
 #!/bin/bash
 # Script to start two VMs with bridged networking
 
+# Ensure script is run from PrimedSLURM directory
+if [ ! -f "README.md" ] || [ ! -d "scripts" ]; then
+    echo -e "\033[0;31mError: This script must be run from the PrimedSLURM directory.\033[0m"
+    echo -e "\033[1;33mPlease cd to the PrimedSLURM directory and run: ./auto_vm_connect.sh\033[0m"
+    exit 1
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -74,7 +81,7 @@ wait_for_ssh_direct() {
 kill_qemu_processes
 
 # Configuration
-VM_DIR="/home/thinclient/Documents/PrimedSLURM/qemu-vms"
+VM_DIR="./qemu-vms"
 IMAGE_PATH="${VM_DIR}/ubuntu-22.04-server-cloudimg-amd64.img"
 SAVED_IMAGE="${VM_DIR}/saved-ubuntu-vm.qcow2"
 VM_USERNAME="ubuntu"

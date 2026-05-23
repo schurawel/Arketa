@@ -6,7 +6,7 @@
 .PHONY: test-python test-apptainer test-ml test-distributed test-extended test-mpi
 .PHONY: show-job-output show-all-outputs show-latest-outputs
 .PHONY: ondemand slurm-web open-ondemand open-slurm-web slurm-web-diag
-.PHONY: build-vagrant build-base remove-base list-boxes preflight setup-repos
+.PHONY: build-vagrant build-base remove-base list-boxes preflight setup-repos dependencies
 .PHONY: metal sim-metal sim-metal-status sim-metal-stop sim-metal-clean sim-metal-connect metal-clean
 .PHONY: q-cluster-refresh-samples
 
@@ -379,7 +379,50 @@ ondemand-diag: ## 🔍 Diagnose OnDemand configuration issues
 	@echo "$(BLUE)[INFO]$(NC) Diagnostics complete. Try accessing http://192.168.7.10/ again."
 	@echo "$(YELLOW)[INFO]$(NC) Default credentials - Username: ooduser, Password: ooduser"
 
-## 🖥️ QEMU Cluster Management
+## � System Dependencies
+
+dependencies: ## 📦 Install system dependencies for QEMU/KVM virtualization
+	@echo "$(BLUE)[INFO]$(NC) Installing QEMU/KVM and virtualization dependencies..."
+	@echo "$(YELLOW)[WARNING]$(NC) This will install system packages and may require sudo password"
+	sudo apt update
+	sudo apt install -y \
+		qemu-kvm \
+		qemu-system-x86 \
+		qemu-utils \
+		cloud-image-utils \
+		virt-manager \
+		bridge-utils \
+		openvswitch-switch \
+		openvswitch-common \
+		sshpass \
+		openssh-client \
+		iproute2 \
+		iputils-ping \
+		wget \
+		curl \
+		netcat-openbsd \
+		socat \
+		net-tools \
+		xterm
+	@echo "$(BLUE)[INFO]$(NC) Adding current user to KVM group for VM access..."
+	sudo usermod -a -G kvm $(shell whoami)
+	@echo "$(BLUE)[INFO]$(NC) Enabling and starting Open vSwitch service..."
+	sudo systemctl enable openvswitch-switch
+	sudo systemctl start openvswitch-switch
+	@echo "$(GREEN)[SUCCESS]$(NC) Dependencies installed successfully!"
+	@echo "$(YELLOW)[INFO]$(NC) You may need to log out and back in for group changes to take effect"
+	@echo "$(BLUE)[INFO]$(NC) Verifying installation..."
+	@which qemu-system-x86_64 >/dev/null && echo "$(GREEN)✓$(NC) qemu-system-x86_64 installed" || echo "$(RED)✗$(NC) qemu-system-x86_64 not found"
+	@which qemu-img >/dev/null && echo "$(GREEN)✓$(NC) qemu-img installed" || echo "$(RED)✗$(NC) qemu-img not found"
+	@which cloud-localds >/dev/null && echo "$(GREEN)✓$(NC) cloud-localds installed" || echo "$(RED)✗$(NC) cloud-localds not found"
+	@which sshpass >/dev/null && echo "$(GREEN)✓$(NC) sshpass installed" || echo "$(RED)✗$(NC) sshpass not found"
+	@which ovs-vsctl >/dev/null && echo "$(GREEN)✓$(NC) ovs-vsctl installed" || echo "$(RED)✗$(NC) ovs-vsctl not found"
+	@which ssh >/dev/null && echo "$(GREEN)✓$(NC) ssh installed" || echo "$(RED)✗$(NC) ssh not found"
+	@which ping >/dev/null && echo "$(GREEN)✓$(NC) ping installed" || echo "$(RED)✗$(NC) ping not found"
+	@which ip >/dev/null && echo "$(GREEN)✓$(NC) ip command installed" || echo "$(RED)✗$(NC) ip command not found"
+	@systemctl is-active --quiet openvswitch-switch && echo "$(GREEN)✓$(NC) Open vSwitch service running" || echo "$(YELLOW)⚠$(NC) Open vSwitch service not running"
+
+## �🖥️ QEMU Cluster Management
 
 q-cluster: setup-repos ## 🚀 Build and start QEMU-based Slurm cluster
 	@echo "$(BLUE)[INFO]$(NC) Building QEMU-based Slurm cluster..."
@@ -563,3 +606,66 @@ slurm-web: ## 🌐 Open the Slurm-web interface in browser
 		echo "$(YELLOW)[TIP]$(NC) Make sure the QEMU cluster is running with: make q-cluster"; \
 	fi
 
+## 📚 Repository Setup
+
+setup-repos: ## 📚 Clone and setup required repositories
+	@echo "$(BLUE)[INFO]$(NC) Setting up required repositories..."
+	@if [ -f "./setup-repos.sh" ]; then \
+		chmod +x ./setup-repos.sh; \
+		./setup-repos.sh; \
+	else \
+		echo "$(GREEN)[INFO]$(NC) No setup-repos.sh script found, skipping repository setup"; \
+	fi
+
+restart-slurm: ## 🔁 Restart Slurm services on physical servers (hardwired: server2, server3, server4)
+	@echo "$(BLUE)[INFO]$(NC) Restarting Slurm services on physical servers..."; \
+	servers="server2 server3 server4"; \
+	ips="192.168.1.202 192.168.1.203 192.168.1.204"; \
+	pws="Server2Pwd Server3Pwd Server4Pwd"; \
+	i=1; \
+	for srv in $$servers; do \
+		ip=$$(echo $$ips | cut -d' ' -f$$i); \
+		pw=$$(echo $$pws | cut -d' ' -f$$i); \
+		echo "$(BLUE)[INFO]$(NC) Restarting services on $$srv ($$ip)..."; \
+		sshpass -p "$$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $$srv@$$ip "echo '$$pw' | sudo -S systemctl restart munge; sleep 2; echo '$$pw' | sudo -S systemctl restart slurmd || true; if [ \"$$srv\" = \"server2\" ]; then echo '$$pw' | sudo -S systemctl restart slurmctld || true; echo '$$pw' | sudo -S systemctl restart slurmdbd || true; fi" || true; \
+		sshpass -p "$$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $$srv@$$ip "echo '$$pw' | sudo -S systemctl is-active munge slurmd slurmctld slurmdbd || true" || true; \
+		i=$$((i+1)); \
+	done; \
+	echo "$(GREEN)[SUCCESS]$(NC) Restart commands issued for: $$servers"
+
+show-slurm-status: ## 📊 Check status of Slurm services on physical servers (hardwired: server2, server3, server4)
+	@echo "$(BLUE)[INFO]$(NC) Checking Slurm service status on physical servers..."; \
+	echo ""; \
+	servers="server2 server3 server4"; \
+	ips="192.168.1.202 192.168.1.203 192.168.1.204"; \
+	pws="Server2Pwd Server3Pwd Server4Pwd"; \
+	i=1; \
+	for srv in $$servers; do \
+		ip=$$(echo $$ips | cut -d' ' -f$$i); \
+		pw=$$(echo $$pws | cut -d' ' -f$$i); \
+		echo "$(BOLD)================================================================================$(NC)"; \
+		echo "$(BLUE)[STATUS]$(NC) Checking services on $$srv ($$ip)"; \
+		echo "$(BOLD)================================================================================$(NC)"; \
+		echo ""; \
+		sshpass -p "$$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $$srv@$$ip "echo '🔍 MUNGE Service:'; echo '$$pw' | sudo -S systemctl status munge --no-pager -l || true; echo ''; echo '🔍 SLURMD Service:'; echo '$$pw' | sudo -S systemctl status slurmd --no-pager -l || true; if [ \"$$srv\" = \"server2\" ]; then echo ''; echo '🔍 SLURMCTLD Service:'; echo '$$pw' | sudo -S systemctl status slurmctld --no-pager -l || true; echo ''; echo '🔍 SLURMDBD Service:'; echo '$$pw' | sudo -S systemctl status slurmdbd --no-pager -l || true; fi" || true; \
+		echo ""; \
+		echo "$(BLUE)[SUMMARY]$(NC) Service Status on $$srv:"; \
+		sshpass -p "$$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $$srv@$$ip "echo '$$pw' | sudo -S systemctl is-active munge slurmd slurmctld slurmdbd 2>/dev/null | paste -d' ' <(echo -e 'munge\\nslurmd\\nslurmctld\\nslurmdbd') - | while read service status; do if [ \"\$$status\" = \"active\" ]; then echo \"  ✅ \$$service: \$$status\"; elif [ \"\$$status\" = \"inactive\" ] || [ \"\$$status\" = \"failed\" ]; then echo \"  ❌ \$$service: \$$status\"; else echo \"  ⚠️  \$$service: \$$status\"; fi; done" || true; \
+		echo ""; \
+		i=$$((i+1)); \
+	done; \
+	echo "$(GREEN)[COMPLETE]$(NC) Status check finished for all servers"
+
+sinfo: ## 📊 Show cluster node information on physical servers
+	@echo "$(BLUE)[INFO]$(NC) Checking SLURM cluster node information..."; \
+	echo ""; \
+	sshpass -p "Server2Pwd" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null server2@192.168.1.202 "echo '$(BOLD)SLURM Cluster Node Information:$(NC)'; echo ''; /opt/slurm/bin/sinfo -N -l || echo '$$pw' | sudo -S /opt/slurm/bin/sinfo -N -l || echo 'sinfo command failed'; echo ''; echo '$(BOLD)Partition Information:$(NC)'; echo ''; /opt/slurm/bin/sinfo || echo '$$pw' | sudo -S /opt/slurm/bin/sinfo || echo 'sinfo command failed'" || { \
+		echo "$(RED)[ERROR]$(NC) Failed to connect to controller or run sinfo command"; \
+	}
+
+squeue: ## 📋 Show job queue on physical servers
+	@echo "$(BLUE)[INFO]$(NC) Checking SLURM job queue..."; \
+	echo ""; \
+	sshpass -p "Server2Pwd" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null server2@192.168.1.202 "echo '$(BOLD)SLURM Job Queue:$(NC)'; echo ''; /opt/slurm/bin/squeue -l || echo 'Server2Pwd' | sudo -S /opt/slurm/bin/squeue -l || echo 'squeue command failed'; echo ''; echo '$(BOLD)Job Queue Summary:$(NC)'; echo ''; /opt/slurm/bin/squeue || echo 'Server2Pwd' | sudo -S /opt/slurm/bin/squeue || echo 'squeue command failed'" || { \
+		echo "$(RED)[ERROR]$(NC) Failed to connect to controller or run squeue command"; \
+	}

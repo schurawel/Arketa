@@ -71,11 +71,11 @@ sudo python3 -m venv $SLURM_WEB_DIR/venv
 echo "Installing agent package..."
 if [ -f "$SLURM_WEB_DIR/python/agent/setup.py" ]; then
     # First try: Use regular pip install if setup.py exists
-    sudo $SLURM_WEB_DIR/venv/bin/pip install $SLURM_WEB_DIR/python/agent || {
+    sudo $SLURM_WEB_DIR/venv/bin/pip install --break-system-packages $SLURM_WEB_DIR/python/agent || {
         echo "Standard install failed, trying alternative methods..."
         # Second try: Install requirements directly if requirements.txt exists
         if [ -f "$SLURM_WEB_DIR/python/agent/requirements.txt" ]; then
-            sudo $SLURM_WEB_DIR/venv/bin/pip install -r $SLURM_WEB_DIR/python/agent/requirements.txt
+            sudo $SLURM_WEB_DIR/venv/bin/pip install --break-system-packages -r $SLURM_WEB_DIR/python/agent/requirements.txt
         fi
         # Copy the agent module to site-packages manually if needed
         SITE_PACKAGES=$(sudo $SLURM_WEB_DIR/venv/bin/python -c "import site; print(site.getsitepackages()[0])")
@@ -97,11 +97,11 @@ fi
 echo "Installing gateway package..."
 if [ -f "$SLURM_WEB_DIR/python/gateway/setup.py" ]; then
     # First try: Use regular pip install if setup.py exists
-    sudo $SLURM_WEB_DIR/venv/bin/pip install $SLURM_WEB_DIR/python/gateway || {
+    sudo $SLURM_WEB_DIR/venv/bin/pip install --break-system-packages $SLURM_WEB_DIR/python/gateway || {
         echo "Standard install failed, trying alternative methods..."
         # Second try: Install requirements directly if requirements.txt exists
         if [ -f "$SLURM_WEB_DIR/python/gateway/requirements.txt" ]; then
-            sudo $SLURM_WEB_DIR/venv/bin/pip install -r $SLURM_WEB_DIR/python/gateway/requirements.txt
+            sudo $SLURM_WEB_DIR/venv/bin/pip install --break-system-packages -r $SLURM_WEB_DIR/python/gateway/requirements.txt
         fi
         # Copy the gateway module to site-packages manually if needed
         SITE_PACKAGES=$(sudo $SLURM_WEB_DIR/venv/bin/python -c "import site; print(site.getsitepackages()[0])")
@@ -121,7 +121,7 @@ else
 fi
 
 # Install any additional required packages
-sudo $SLURM_WEB_DIR/venv/bin/pip install fastapi uvicorn pyjwt flask flask-restful
+sudo $SLURM_WEB_DIR/venv/bin/pip install --break-system-packages fastapi uvicorn pyjwt flask flask-restful
 
 # Verify installation by checking for the entry point scripts
 if [ ! -f "$SLURM_WEB_DIR/venv/bin/slurm-web-agent" ]; then

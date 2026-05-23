@@ -49,7 +49,7 @@ apt-get install -y \
     build-essential git autoconf automake libtool \
     pkg-config libssl-dev libpam0g-dev libnuma-dev libhwloc-dev \
     libfreeipmi-dev librrd-dev libncurses5-dev libreadline-dev \
-    python3-dev python3-pip munge libmunge-dev libmunge2 \
+    python3-dev python3-pip python3-venv munge libmunge-dev libmunge2 \
     cmake wget curl vim nfs-kernel-server nfs-common chrony \
     software-properties-common libseccomp-dev squashfs-tools cryptsetup \
     fuse libfuse-dev uuid-dev libgpgme11-dev \
@@ -77,8 +77,22 @@ apt-get install -y \
 # Install Python virtual environment and Jupyter packages
 # Consolidated from setup-ondemand.sh to provide Jupyter support across all nodes
 log "Installing Python virtual environment and Jupyter packages..."
-python3 -m pip install --upgrade pip
-pip3 install jupyter jupyterlab numpy pandas matplotlib seaborn
+
+# Create a virtual environment for Jupyter to avoid conflicts with system packages
+if [ ! -d "/opt/jupyter-env" ]; then
+    log "Creating virtual environment for Jupyter..."
+    sudo python3 -m venv /opt/jupyter-env
+    sudo /opt/jupyter-env/bin/pip install --upgrade pip
+    sudo /opt/jupyter-env/bin/pip install jupyter jupyterlab numpy pandas matplotlib seaborn
+    
+    # Create symlinks for global access
+    sudo ln -sf /opt/jupyter-env/bin/jupyter /usr/local/bin/jupyter
+    sudo ln -sf /opt/jupyter-env/bin/jupyter-lab /usr/local/bin/jupyter-lab
+    
+    log "Jupyter virtual environment created and linked globally"
+else
+    log "Jupyter virtual environment already exists"
+fi
 
 # Install Go
 log "Installing Go ${GO_VERSION}..."
@@ -294,14 +308,46 @@ install_slurm_from_git() {
     install_slurm_from_source "$temp_dir"
 }
 
-# Check if Slurm source is available and install it
-if [ -d "/home/vagrant/slurm-src" ]; then
-    install_slurm_from_source "/home/vagrant/slurm-src"
-elif [ -d "/opt/slurm-src" ]; then
-    install_slurm_from_source "/opt/slurm-src"
+# Check if Slurm is already installed and working
+if [ -f "/opt/slurm/bin/sinfo" ] && [ -f "/opt/slurm/sbin/slurmctld" ]; then
+    log "Checking existing SLURM installation..."
+    slurm_version=$(/opt/slurm/sbin/slurmctld -V 2>/dev/null | head -1 || echo "unknown")
+    if [ "$slurm_version" != "unknown" ]; then
+        success "SLURM is already installed: $slurm_version"
+        log "Skipping SLURM compilation - using existing installation"
+        # Still create necessary directories in case they're missing
+        mkdir -p /etc/slurm /var/spool/slurmctld /var/spool/slurmd /var/log/slurm /opt/slurm/var/run
+        chown -R slurm:slurm /var/spool/slurmctld /var/spool/slurmd /var/log/slurm /opt/slurm/var/run 2>/dev/null || true
+        
+        # Ensure PATH is set up
+        if ! grep -q "/opt/slurm/bin" /etc/profile.d/slurm.sh 2>/dev/null; then
+            echo 'export PATH="/opt/slurm/bin:/opt/slurm/sbin:$PATH"' > /etc/profile.d/slurm.sh
+            echo 'export LD_LIBRARY_PATH="/opt/slurm/lib:$LD_LIBRARY_PATH"' >> /etc/profile.d/slurm.sh
+            chmod +x /etc/profile.d/slurm.sh
+        fi
+    else
+        log "SLURM binaries found but not working properly - will reinstall"
+        # Check if Slurm source is available and install it
+        if [ -d "/home/vagrant/slurm-src" ]; then
+            install_slurm_from_source "/home/vagrant/slurm-src"
+        elif [ -d "/opt/slurm-src" ]; then
+            install_slurm_from_source "/opt/slurm-src"
+        else
+            log "Slurm source not found locally - attempting to clone from Git..."
+            install_slurm_from_git
+        fi
+    fi
 else
-    log "Slurm source not found locally - attempting to clone from Git..."
-    install_slurm_from_git
+    log "SLURM not found - proceeding with installation"
+    # Check if Slurm source is available and install it
+    if [ -d "/home/vagrant/slurm-src" ]; then
+        install_slurm_from_source "/home/vagrant/slurm-src"
+    elif [ -d "/opt/slurm-src" ]; then
+        install_slurm_from_source "/opt/slurm-src"
+    else
+        log "Slurm source not found locally - attempting to clone from Git..."
+        install_slurm_from_git
+    fi
 fi
 
 # Clean up for imaging (when preparing base images)
